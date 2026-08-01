@@ -21,10 +21,11 @@ function reapTempDirs() {
       if (session) {
         teardownBrokerSession({ ...session, killProcess: terminateProcessTree });
       }
+      fs.rmSync(dir, { recursive: true, force: true });
     } catch {
-      // Best effort: a missing or malformed broker session must not fail the run.
+      // Best effort at exit: a malformed broker session, or a dir Windows still holds a
+      // handle on right after the kill, must not fail an otherwise-passing test file.
     }
-    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
