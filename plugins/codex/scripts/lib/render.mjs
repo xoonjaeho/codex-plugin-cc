@@ -388,7 +388,10 @@ export function renderJobStatusReport(job) {
 }
 
 // Whitespace is not output: a stored "\n" would otherwise count as a result and
-// suppress the transcript recovery that has the real answer.
+// suppress the transcript recovery that has the real answer. Every place that decides
+// "this job has output" -- storedJobHasOutput and each early return in
+// renderStoredJobResult -- must agree on that, or one of them suppresses the recovery
+// and the other discards it.
 function hasText(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -418,8 +421,8 @@ export function renderStoredJobResult(job, storedJob, recovered = null) {
   }
 
   const rawOutput =
-    (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) ||
-    (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
+    (hasText(storedJob?.result?.rawOutput) && storedJob.result.rawOutput) ||
+    (hasText(storedJob?.result?.codex?.stdout) && storedJob.result.codex.stdout) ||
     "";
   if (rawOutput) {
     const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
@@ -429,7 +432,7 @@ export function renderStoredJobResult(job, storedJob, recovered = null) {
     return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
   }
 
-  if (storedJob?.rendered) {
+  if (hasText(storedJob?.rendered)) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {
       return output;
