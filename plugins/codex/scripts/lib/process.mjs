@@ -54,6 +54,23 @@ function looksLikeMissingProcessMessage(text) {
   return /not found|no running instance|cannot find|does not exist|no such process/i.test(text);
 }
 
+// taskkill's exit code for "no such process". Locale-independent, unlike the message
+// text: on a non-English Windows the "not found" wording is translated and the regex
+// above never matches, so an already-dead pid would surface as a thrown error.
+const TASKKILL_PROCESS_NOT_FOUND = 128;
+
+// On Windows runCommand spawns through $SHELL, which is Git Bash when Claude Code runs
+// from it. MSYS then rewrites taskkill's `/PID` flag into a path (`C:/Program Files/Git/PID`)
+// and the call fails. Disable the conversion for this child only -- setting it on the
+// node process itself would break the `/c/...` paths node needs to resolve.
+function envWithoutMsysPathConversion(env) {
+  return {
+    ...(env ?? process.env),
+    MSYS_NO_PATHCONV: "1",
+    MSYS2_ARG_CONV_EXCL: "*"
+  };
+}
+
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null };
@@ -66,7 +83,7 @@ export function terminateProcessTree(pid, options = {}) {
   if (platform === "win32") {
     const result = runCommandImpl("taskkill", ["/PID", String(pid), "/T", "/F"], {
       cwd: options.cwd,
-      env: options.env
+      env: envWithoutMsysPathConversion(options.env)
     });
 
     if (!result.error && result.status === 0) {
@@ -74,7 +91,10 @@ export function terminateProcessTree(pid, options = {}) {
     }
 
     const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
-    if (!result.error && looksLikeMissingProcessMessage(combinedOutput)) {
+    if (
+      !result.error &&
+      (result.status === TASKKILL_PROCESS_NOT_FOUND || looksLikeMissingProcessMessage(combinedOutput))
+    ) {
       return { attempted: true, delivered: false, method: "taskkill", result };
     }
 

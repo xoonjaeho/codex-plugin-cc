@@ -7,8 +7,9 @@ test("terminateProcessTree uses taskkill on Windows", () => {
   let captured = null;
   const outcome = terminateProcessTree(1234, {
     platform: "win32",
-    runCommandImpl(command, args) {
-      captured = { command, args };
+    env: { PATH: "C:\\Windows\\System32", SHELL: "C:\\Program Files\\Git\\bin\\bash.exe" },
+    runCommandImpl(command, args, options) {
+      captured = { command, args, options };
       return {
         command,
         args,
@@ -26,9 +27,44 @@ test("terminateProcessTree uses taskkill on Windows", () => {
 
   assert.deepEqual(captured, {
     command: "taskkill",
-    args: ["/PID", "1234", "/T", "/F"]
+    args: ["/PID", "1234", "/T", "/F"],
+    options: {
+      cwd: undefined,
+      env: {
+        PATH: "C:\\Windows\\System32",
+        SHELL: "C:\\Program Files\\Git\\bin\\bash.exe",
+        MSYS_NO_PATHCONV: "1",
+        MSYS2_ARG_CONV_EXCL: "*"
+      }
+    }
   });
   assert.equal(outcome.delivered, true);
+  assert.equal(outcome.method, "taskkill");
+});
+
+test("terminateProcessTree treats exit code 128 as already stopped on a non-English Windows", () => {
+  // Korean Windows: taskkill translates "not found", so the English regex cannot match.
+  // Only the exit code identifies the case. Without it this call throws.
+  const outcome = terminateProcessTree(1234, {
+    platform: "win32",
+    runCommandImpl(command, args) {
+      return {
+        command,
+        args,
+        status: 128,
+        signal: null,
+        stdout: "",
+        stderr: "오류: 프로세스 \"1234\"을(를) 찾을 수 없습니다.",
+        error: null
+      };
+    },
+    killImpl() {
+      throw new Error("kill fallback should not run");
+    }
+  });
+
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.delivered, false);
   assert.equal(outcome.method, "taskkill");
 });
 
