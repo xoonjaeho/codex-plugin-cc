@@ -24,8 +24,11 @@ function turnStart(turnId) {
   return { type: "event_msg", payload: { type: "task_started", turn_id: turnId } };
 }
 
-function turnEnd(turnId) {
-  return { type: "event_msg", payload: { type: "task_complete", turn_id: turnId } };
+function turnEnd(turnId, lastAgentMessage = "") {
+  return {
+    type: "event_msg",
+    payload: { type: "task_complete", turn_id: turnId, last_agent_message: lastAgentMessage }
+  };
 }
 
 // Mirrors a real transcript: nested <sessions>/<YYYY>/<MM>/<DD>/rollout-<ts>-<threadId>.jsonl
@@ -80,6 +83,55 @@ test("readLastAssistantMessage ignores turns belonging to another job on the sam
   );
 });
 
+// The transcript keeps codex's internal citation markup on the raw assistant record;
+// `task_complete.last_agent_message` is the same answer with that stripped, and its
+// presence is also the only proof the turn actually finished.
+test("readLastAssistantMessage prefers the finished turn's own final message", () => {
+  const sessionsDir = makeTempDir();
+  writeRollout(sessionsDir, THREAD_ID, [
+    turnStart(TURN_ID),
+    assistantRecord("the answer<oai-mem-citation>internal</citation_entries>"),
+    turnEnd(TURN_ID, "the answer")
+  ]);
+
+  const recovered = readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir });
+
+  assert.equal(recovered.text, "the answer");
+  assert.equal(recovered.complete, true);
+});
+
+test("readLastAssistantMessage falls back to the raw scan when the turn never completed", () => {
+  const sessionsDir = makeTempDir();
+  writeRollout(sessionsDir, THREAD_ID, [
+    turnStart(TURN_ID),
+    assistantRecord("still working on it"),
+    // no task_complete: the turn was interrupted
+    turnStart(LATER_TURN_ID),
+    assistantRecord("a later job's answer"),
+    turnEnd(LATER_TURN_ID, "a later job's answer")
+  ]);
+
+  const recovered = readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir });
+
+  assert.equal(recovered.text, "still working on it");
+  assert.equal(recovered.complete, false);
+});
+
+// A turn that errored records `task_complete` with an empty `last_agent_message`.
+test("readLastAssistantMessage ignores an empty final message on a failed turn", () => {
+  const sessionsDir = makeTempDir();
+  writeRollout(sessionsDir, THREAD_ID, [
+    turnStart(TURN_ID),
+    assistantRecord("as far as I got"),
+    turnEnd(TURN_ID, "")
+  ]);
+
+  const recovered = readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir });
+
+  assert.equal(recovered.text, "as far as I got");
+  assert.equal(recovered.complete, false);
+});
+
 test("readLastAssistantMessage survives the half-written final line a killed turn leaves", () => {
   const sessionsDir = makeTempDir();
   const file = writeRollout(sessionsDir, THREAD_ID, [
@@ -124,11 +176,18 @@ test("storedJobHasOutput distinguishes a stored result from an empty one", () =>
   assert.equal(storedJobHasOutput({ rendered: "# Report" }), true);
   assert.equal(storedJobHasOutput({ result: { rawOutput: "" } }), false);
   assert.equal(storedJobHasOutput(null), false);
+  // Whitespace would otherwise count as output and suppress the transcript recovery.
+  assert.equal(storedJobHasOutput({ result: { rawOutput: "\n" } }), false);
+  assert.equal(storedJobHasOutput({ rendered: "  \n " }), false);
 });
 
 test("renderStoredJobResult surfaces a recovered message instead of the empty-payload notice", () => {
   const job = { id: "job-1", status: "failed", threadId: THREAD_ID };
-  const recovered = { text: "VERDICT: the lease is never released", file: "C:/rollout.jsonl" };
+  const recovered = {
+    text: "VERDICT: the lease is never released",
+    complete: false,
+    file: "C:/rollout.jsonl"
+  };
 
   const rendered = renderStoredJobResult(job, null, recovered);
 
@@ -136,6 +195,18 @@ test("renderStoredJobResult surfaces a recovered message instead of the empty-pa
   assert.match(rendered, /VERDICT: the lease is never released/);
   assert.match(rendered, /C:\/rollout\.jsonl/);
   assert.doesNotMatch(rendered, /No captured result payload was stored/);
+});
+
+test("renderStoredJobResult drops the PARTIAL label when the turn did finish", () => {
+  const job = { id: "job-1", status: "failed", threadId: THREAD_ID };
+  const recovered = { text: "the final answer", complete: true, file: "C:/rollout.jsonl" };
+
+  const rendered = renderStoredJobResult(job, null, recovered);
+
+  assert.match(rendered, /Recovered from the Codex transcript$/m);
+  assert.match(rendered, /the turn did finish/);
+  assert.doesNotMatch(rendered, /PARTIAL/);
+  assert.doesNotMatch(rendered, /may not have finished/);
 });
 
 test("renderStoredJobResult keeps the empty-payload notice when nothing was recovered", () => {

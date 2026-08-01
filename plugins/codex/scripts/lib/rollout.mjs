@@ -54,7 +54,7 @@ function messageText(payload) {
   return payload.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("");
 }
 
-function readLastAssistantText(filePath, turnId) {
+function readTurnResult(filePath, turnId) {
   let raw;
   try {
     raw = fs.readFileSync(filePath, "utf8");
@@ -62,7 +62,8 @@ function readLastAssistantText(filePath, turnId) {
     return null;
   }
 
-  let latest = null;
+  let finished = null; // codex's own final message for the turn, from `task_complete`
+  let latest = null; // fallback: the last thing it said before the turn was cut short
   let openTurnId = null;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -76,8 +77,20 @@ function readLastAssistantText(filePath, turnId) {
       continue; // a killed turn can leave a half-written final line
     }
     const payload = record?.payload;
-    if (typeof payload?.turn_id === "string" && payload.turn_id) {
-      openTurnId = payload.turn_id;
+    const marker = typeof payload?.turn_id === "string" && payload.turn_id ? payload.turn_id : null;
+
+    if (payload?.type === "task_complete") {
+      // Prefer this over the raw scan: it is the same text codex shows a caller that
+      // did get a result, already stripped of the citation markup the transcript keeps.
+      if (marker === turnId && typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()) {
+        finished = payload.last_agent_message;
+      }
+      openTurnId = null; // the turn is over; later records belong to another one
+      continue;
+    }
+
+    if (marker) {
+      openTurnId = marker;
     }
     if (openTurnId !== turnId) {
       continue; // another job's turn on this same thread
@@ -91,18 +104,25 @@ function readLastAssistantText(filePath, turnId) {
     }
   }
 
-  return latest;
+  if (finished) {
+    return { text: finished, complete: true };
+  }
+  return latest ? { text: latest, complete: false } : null;
 }
 
 /**
- * Last assistant message codex recorded for `turnId` on `threadId`, or null when
- * there is no transcript, that turn is not in it, or it holds no assistant text.
- * A missing `turnId` also returns null: the turn cannot be identified, and a
- * neighbouring turn's answer is a wrong answer.
+ * What codex recorded for `turnId` on `threadId`, or null when there is no
+ * transcript, that turn is not in it, or it holds no assistant text. `complete` is
+ * true when the answer came from the turn's own `task_complete` record -- that turn
+ * finished, and this is the final message. False means the turn was cut short and
+ * the text is the last thing said before it stopped, which may be mid-thought.
+ *
+ * A missing `turnId` returns null: the turn cannot be identified, and a neighbouring
+ * turn's answer is a wrong answer.
  *
  * @param {string} threadId
  * @param {{ turnId?: string | null, sessionsDir?: string, codexHome?: string }} [options]
- * @returns {{ text: string, file: string } | null}
+ * @returns {{ text: string, complete: boolean, file: string } | null}
  */
 export function readLastAssistantMessage(threadId, options = {}) {
   const turnId = options.turnId;
@@ -120,10 +140,10 @@ export function readLastAssistantMessage(threadId, options = {}) {
     return null;
   }
 
-  const text = readLastAssistantText(file, turnId);
-  if (!text) {
+  const result = readTurnResult(file, turnId);
+  if (!result) {
     return null;
   }
 
-  return { text, file };
+  return { ...result, file };
 }
