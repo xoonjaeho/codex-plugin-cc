@@ -2,10 +2,12 @@
 
 import fs from "node:fs";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
 import {
+  brokerProcessMatchesRecordedStart,
   clearBrokerSession,
   LOG_FILE_ENV,
   loadBrokerSession,
@@ -80,7 +82,7 @@ function handleSessionStart(input) {
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
 }
 
-async function handleSessionEnd(input) {
+export async function handleSessionEnd(input, options = {}) {
   const cwd = input.cwd || process.cwd();
   const brokerSession =
     loadBrokerSession(cwd) ??
@@ -96,6 +98,16 @@ async function handleSessionEnd(input) {
   const logFile = brokerSession?.logFile ?? null;
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
+  const brokerPidVerified = brokerSession
+    ? brokerProcessMatchesRecordedStart(brokerSession, options)
+    : false;
+  const terminateBrokerProcess = (targetPid) =>
+    terminateProcessTree(targetPid, {
+      platform: options.platform,
+      runCommandImpl: options.runCommandImpl,
+      killImpl: options.killImpl,
+      killWaitMs: options.killWaitMs
+    });
 
   if (brokerEndpoint) {
     await sendBrokerShutdown(brokerEndpoint);
@@ -108,7 +120,7 @@ async function handleSessionEnd(input) {
     logFile,
     sessionDir,
     pid,
-    killProcess: terminateProcessTree
+    killProcess: brokerPidVerified ? terminateBrokerProcess : null
   });
   clearBrokerSession(cwd);
 }
@@ -127,7 +139,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}
