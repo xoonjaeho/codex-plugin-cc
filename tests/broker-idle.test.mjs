@@ -11,6 +11,7 @@ import {
   BROKER_IDLE_MS_ENV,
   createBrokerSessionDir,
   ensureBrokerSession,
+  loadBrokerSession,
   saveBrokerSession,
   spawnBrokerProcess,
   waitForBrokerEndpoint
@@ -68,11 +69,57 @@ test("a broker nobody connects to exits on its own", async () => {
 
   // Wait on the pid file, not the endpoint: probing the endpoint would connect and
   // disconnect, which is the other code path. Nothing here ever connects.
+  // Record it the way ensureBrokerSession would, so the idle exit has something to clear.
+  saveBrokerSession(cwd, { endpoint, pidFile, logFile, sessionDir, pid: child.pid });
+
+  // Wait on the pid file, not the endpoint: probing the endpoint would connect and
+  // disconnect, which is the other code path. Nothing here ever connects.
   assert.equal(await waitForFile(pidFile, 10000), true, "broker never came up");
   assert.equal(await waitForExit(child.pid, 10000), true, "broker was still alive after idling");
   assert.equal(fs.existsSync(pidFile), false, "the pid file outlived the broker");
+  // `reuseExistingBroker` callers read this record without probing, so a survivor points
+  // them at a dead socket instead of the direct spawn they fall back to when it is absent.
+  assert.equal(loadBrokerSession(cwd), null, "broker.json outlived the broker");
 
   fs.rmSync(sessionDir, { recursive: true, force: true });
+});
+
+// Only its own record: by the time an idle broker exits, a replacement may already own
+// this cwd, and clearing that would strand the live one.
+test("an idle broker leaves a replacement's session record alone", async () => {
+  const cwd = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+
+  const sessionDir = createBrokerSessionDir();
+  const pidFile = path.join(sessionDir, "broker.pid");
+  const child = spawnBrokerProcess({
+    scriptPath: BROKER_SCRIPT,
+    cwd,
+    endpoint: createBrokerEndpoint(sessionDir),
+    pidFile,
+    logFile: path.join(sessionDir, "broker.log"),
+    env: { ...buildEnv(binDir), [BROKER_IDLE_MS_ENV]: "300" }
+  });
+  assert.equal(await waitForFile(pidFile, 10000), true, "broker never came up");
+
+  // A different broker's record, as a replacement would have written it.
+  const otherDir = createBrokerSessionDir();
+  const other = {
+    endpoint: createBrokerEndpoint(otherDir),
+    pidFile: path.join(otherDir, "broker.pid"),
+    logFile: path.join(otherDir, "broker.log"),
+    sessionDir: otherDir,
+    pid: 999999
+  };
+  saveBrokerSession(cwd, other);
+
+  assert.equal(await waitForExit(child.pid, 10000), true, "broker was still alive after idling");
+  assert.deepEqual(loadBrokerSession(cwd), other, "it cleared someone else's record");
+
+  for (const dir of [sessionDir, otherDir]) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // Replacing a stale broker deletes its pid, log and state files whether or not the
