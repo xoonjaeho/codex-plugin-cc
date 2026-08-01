@@ -8,6 +8,7 @@ export function runCommand(command, args = [], options = {}) {
     encoding: "utf8",
     input: options.input,
     maxBuffer: options.maxBuffer,
+    timeout: options.timeout,
     stdio: options.stdio ?? "pipe",
     shell: options.shell ?? (process.platform === "win32" ? (process.env.SHELL || true) : false),
     windowsHide: true
@@ -102,7 +103,7 @@ function waitForProcessGone(pid, killImpl, timeoutMs) {
 
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
-    return { attempted: false, delivered: false, method: null };
+    return { attempted: false, delivered: false, treeConfirmed: true, method: null };
   }
 
   const platform = options.platform ?? process.platform;
@@ -116,7 +117,7 @@ export function terminateProcessTree(pid, options = {}) {
     });
 
     if (!result.error && result.status === 0) {
-      return { attempted: true, delivered: true, method: "taskkill", result };
+      return { attempted: true, delivered: true, treeConfirmed: true, method: "taskkill", result };
     }
 
     const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
@@ -124,27 +125,31 @@ export function terminateProcessTree(pid, options = {}) {
       !result.error &&
       (result.status === TASKKILL_PROCESS_NOT_FOUND || looksLikeMissingProcessMessage(combinedOutput))
     ) {
-      return { attempted: true, delivered: false, method: "taskkill", result };
+      return { attempted: true, delivered: false, treeConfirmed: true, method: "taskkill", result };
     }
 
-    // taskkill exits non-zero in two cases where the target still ends up dead: it killed
-    // the target but could not reap a descendant ("The operation attempted is not
-    // supported", exit 255), and it raced a process that was already terminating
-    // ("Access is denied", exit 1 -- what `cancel` hits after interrupting the turn).
-    // The exit code separates neither from a genuine failure, and both messages are
-    // localized, so ask the OS whether the target is gone instead of parsing either.
-    // That is what every caller of this actually asked for.
+    // taskkill exits non-zero both after failing to reap a descendant ("The operation
+    // attempted is not supported", 255) and when it races a root that was already
+    // terminating ("Access is denied", 1 -- what `cancel` hits after interrupting the
+    // turn). Both messages are localized, so the root's own liveness is the only usable
+    // signal: it is gone, and the kill should not throw for either case.
+    //
+    // But a non-zero taskkill never establishes that the REST of the tree went with it,
+    // and `/T` leaves no way to enumerate what survived once the root is gone. So the
+    // two facts are reported separately -- `delivered` is about the target, and
+    // `treeConfirmed` is about everything under it. This is the one branch that cannot
+    // account for the whole tree.
     if (!result.error && waitForProcessGone(pid, killImpl, options.killWaitMs ?? 1000)) {
-      return { attempted: true, delivered: true, method: "taskkill", result };
+      return { attempted: true, delivered: true, treeConfirmed: false, method: "taskkill", result };
     }
 
     if (result.error?.code === "ENOENT") {
       try {
         killImpl(pid);
-        return { attempted: true, delivered: true, method: "kill" };
+        return { attempted: true, delivered: true, treeConfirmed: true, method: "kill" };
       } catch (error) {
         if (error?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "kill" };
+          return { attempted: true, delivered: false, treeConfirmed: true, method: "kill" };
         }
         throw error;
       }
@@ -159,21 +164,21 @@ export function terminateProcessTree(pid, options = {}) {
 
   try {
     killImpl(-pid, "SIGTERM");
-    return { attempted: true, delivered: true, method: "process-group" };
+    return { attempted: true, delivered: true, treeConfirmed: true, method: "process-group" };
   } catch (error) {
     if (error?.code !== "ESRCH") {
       try {
         killImpl(pid, "SIGTERM");
-        return { attempted: true, delivered: true, method: "process" };
+        return { attempted: true, delivered: true, treeConfirmed: true, method: "process" };
       } catch (innerError) {
         if (innerError?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "process" };
+          return { attempted: true, delivered: false, treeConfirmed: true, method: "process" };
         }
         throw innerError;
       }
     }
 
-    return { attempted: true, delivered: false, method: "process-group" };
+    return { attempted: true, delivered: false, treeConfirmed: true, method: "process-group" };
   }
 }
 

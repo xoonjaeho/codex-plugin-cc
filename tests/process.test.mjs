@@ -39,6 +39,7 @@ test("terminateProcessTree uses taskkill on Windows", () => {
     }
   });
   assert.equal(outcome.delivered, true);
+  assert.equal(outcome.treeConfirmed, true, "a clean taskkill accounts for the whole tree");
   assert.equal(outcome.method, "taskkill");
 });
 
@@ -65,13 +66,14 @@ test("terminateProcessTree treats exit code 128 as already stopped on a non-Engl
 
   assert.equal(outcome.attempted, true);
   assert.equal(outcome.delivered, false);
+  assert.equal(outcome.treeConfirmed, true, "there was no process, so no tree is in doubt");
   assert.equal(outcome.method, "taskkill");
 });
 
 // The real message, from a Korean Windows host: taskkill killed the target but could not
 // reap one descendant. Keying on the text would reintroduce the locale bug this file
 // exists for, so the target's own liveness has to decide it.
-test("terminateProcessTree accepts a taskkill failure whose target is nonetheless gone", () => {
+test("terminateProcessTree reports a partial taskkill failure when only the root is known gone", () => {
   let probedSignal;
   const outcome = terminateProcessTree(1234, {
     platform: "win32",
@@ -97,6 +99,7 @@ test("terminateProcessTree accepts a taskkill failure whose target is nonetheles
 
   assert.equal(outcome.attempted, true);
   assert.equal(outcome.delivered, true);
+  assert.equal(outcome.treeConfirmed, false, "a partial kill must not claim the tree");
   assert.equal(outcome.method, "taskkill");
   assert.equal(probedSignal, 0, "the target must be probed, not signalled");
 });
@@ -124,6 +127,7 @@ test("terminateProcessTree waits out a target that is still exiting", () => {
   });
 
   assert.equal(outcome.delivered, true);
+  assert.equal(outcome.treeConfirmed, false, "a raced kill cannot account for the tree");
   assert.ok(probes >= 3, "it gave up after a single probe");
 });
 
