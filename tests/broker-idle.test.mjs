@@ -98,17 +98,27 @@ test("replacing a stale broker kills the process it replaces", async () => {
 
   // Record it against an endpoint nothing is listening on: that is what a broker whose
   // endpoint went unreachable looks like to `ensureBrokerSession`.
+  const unreachableDir = createBrokerSessionDir();
   saveBrokerSession(cwd, {
-    endpoint: createBrokerEndpoint(createBrokerSessionDir()),
+    endpoint: createBrokerEndpoint(unreachableDir),
     pidFile: path.join(sessionDir, "broker.pid"),
     logFile: path.join(sessionDir, "broker.log"),
     sessionDir,
     pid: stale.pid
   });
 
-  await ensureBrokerSession(cwd, { scriptPath: BROKER_SCRIPT, env });
+  const replacement = await ensureBrokerSession(cwd, { scriptPath: BROKER_SCRIPT, env });
 
   assert.equal(await waitForExit(stale.pid, 10000), true, "the replaced broker is still running");
+
+  // The replacement self-reaps on its 300 ms idle timeout, but its session dir holds a
+  // log file, so nothing removes it. A test in a leak fix does not get to leak.
+  await waitForExit(replacement?.pid, 10000);
+  for (const dir of [sessionDir, unreachableDir, replacement?.sessionDir]) {
+    if (dir) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 // The timeout must not fire under a connected client: a turn holds its socket open for
