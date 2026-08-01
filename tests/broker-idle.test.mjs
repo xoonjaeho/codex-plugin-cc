@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -12,11 +13,13 @@ import {
   createBrokerSessionDir,
   ensureBrokerSession,
   loadBrokerSession,
+  readProcessStartTime,
   saveBrokerSession,
   spawnBrokerProcess,
   waitForBrokerEndpoint
 } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
+import { handleSessionEnd } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
 
 const BROKER_SCRIPT = fileURLToPath(
   new URL("../plugins/codex/scripts/app-server-broker.mjs", import.meta.url)
@@ -151,21 +154,155 @@ test("replacing a stale broker kills the process it replaces", async () => {
     pidFile: path.join(sessionDir, "broker.pid"),
     logFile: path.join(sessionDir, "broker.log"),
     sessionDir,
-    pid: stale.pid
+    pid: stale.pid,
+    processStartTime: readProcessStartTime(stale.pid)
   });
 
-  const replacement = await ensureBrokerSession(cwd, { scriptPath: BROKER_SCRIPT, env });
+  const killedPids = [];
+  let replacement = null;
+  try {
+    replacement = await ensureBrokerSession(cwd, {
+      scriptPath: BROKER_SCRIPT,
+      env,
+      terminateProcessTreeImpl(pid) {
+        killedPids.push(pid);
+        stale.kill("SIGTERM");
+      }
+    });
 
-  assert.equal(await waitForExit(stale.pid, 10000), true, "the replaced broker is still running");
-
-  // The replacement self-reaps on its 300 ms idle timeout, but its session dir holds a
-  // log file, so nothing removes it. A test in a leak fix does not get to leak.
-  await waitForExit(replacement?.pid, 10000);
-  for (const dir of [sessionDir, unreachableDir, replacement?.sessionDir]) {
-    if (dir) {
-      fs.rmSync(dir, { recursive: true, force: true });
+    assert.deepEqual(killedPids, [stale.pid], "the default broker terminator was not used");
+    assert.equal(await waitForExit(stale.pid, 10000), true, "the replaced broker is still running");
+  } finally {
+    if (isAlive(stale.pid)) {
+      stale.kill("SIGTERM");
+    }
+    await waitForExit(stale.pid, 10000);
+    // The replacement self-reaps on its 300 ms idle timeout, but its session dir holds a
+    // log file, so nothing removes it. A test in a leak fix does not get to leak.
+    await waitForExit(replacement?.pid, 10000);
+    for (const dir of [sessionDir, unreachableDir, replacement?.sessionDir]) {
+      if (dir && fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   }
+});
+
+test("replacing stale state does not kill a pid whose start time does not match", async () => {
+  const cwd = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const env = { ...buildEnv(binDir), [BROKER_IDLE_MS_ENV]: "300" };
+  const recycledPid = 424242;
+
+  const sessionDir = createBrokerSessionDir();
+  const unreachableDir = createBrokerSessionDir();
+  const pidFile = path.join(sessionDir, "broker.pid");
+  const logFile = path.join(sessionDir, "broker.log");
+  fs.writeFileSync(pidFile, `${recycledPid}\n`, "utf8");
+  fs.writeFileSync(logFile, "stale\n", "utf8");
+  saveBrokerSession(cwd, {
+    endpoint: createBrokerEndpoint(unreachableDir),
+    pidFile,
+    logFile,
+    sessionDir,
+    pid: recycledPid,
+    processStartTime: "recorded-start"
+  });
+
+  const killedPids = [];
+  let replacement = null;
+  try {
+    replacement = await ensureBrokerSession(cwd, {
+      scriptPath: BROKER_SCRIPT,
+      env,
+      readProcessStartTime() {
+        return "different-start";
+      },
+      killProcess(pid) {
+        killedPids.push(pid);
+      }
+    });
+
+    assert.deepEqual(killedPids, [], "a recycled pid was killed");
+    assert.equal(fs.existsSync(pidFile), false, "the stale pid file survived");
+    assert.equal(fs.existsSync(logFile), false, "the stale log file survived");
+    assert.notEqual(loadBrokerSession(cwd)?.pid, recycledPid, "the stale state survived");
+  } finally {
+    if (replacement?.pid) {
+      await waitForExit(replacement.pid, 10000);
+    }
+    for (const dir of [sessionDir, unreachableDir, replacement?.sessionDir]) {
+      if (dir && fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("session end does not kill a broker pid whose start time does not match", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = createBrokerSessionDir();
+  const pidFile = path.join(sessionDir, "broker.pid");
+  const logFile = path.join(sessionDir, "broker.log");
+  const recycledPid = 424242;
+  fs.writeFileSync(pidFile, `${recycledPid}\n`, "utf8");
+  fs.writeFileSync(logFile, "stale\n", "utf8");
+  saveBrokerSession(cwd, {
+    endpoint: null,
+    pidFile,
+    logFile,
+    sessionDir,
+    pid: recycledPid,
+    processStartTime: "recorded-start"
+  });
+
+  const killedPids = [];
+  await handleSessionEnd(
+    { cwd, session_id: "identity-test" },
+    {
+      platform: "linux",
+      readProcessStartTime() {
+        return "different-start";
+      },
+      killImpl(pid) {
+        killedPids.push(pid);
+      }
+    }
+  );
+
+  assert.deepEqual(killedPids, [], "the session hook killed a recycled pid");
+  assert.equal(fs.existsSync(pidFile), false, "the stale pid file survived");
+  assert.equal(fs.existsSync(logFile), false, "the stale log file survived");
+  assert.equal(loadBrokerSession(cwd), null, "the stale session record survived");
+});
+
+test("process start-time probes are bounded and timeouts are unverifiable", () => {
+  let captured = null;
+  const timeoutError = new Error("probe timed out");
+  timeoutError.code = "ETIMEDOUT";
+
+  const startTime = readProcessStartTime(1234, {
+    platform: "win32",
+    env: { PATH: "C:\\Windows\\System32" },
+    runCommandImpl(command, args, options) {
+      captured = { command, args, options };
+      return {
+        command,
+        args,
+        status: 0,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        error: timeoutError
+      };
+    }
+  });
+
+  assert.equal(startTime, null, "a timed-out probe was treated as verified");
+  assert.equal(captured?.command, "powershell.exe");
+  assert.equal(captured?.options.timeout, 2000, "the identity probe was not bounded");
+  assert.equal(captured?.options.shell, false);
 });
 
 // The timeout must not fire under a connected client: a turn holds its socket open for
@@ -200,6 +337,36 @@ test("a connected client holds the broker open, and releases it on disconnect", 
 
   socket.end();
   assert.equal(await waitForExit(child.pid, 10000), true, "broker survived its client");
+
+  fs.rmSync(sessionDir, { recursive: true, force: true });
+});
+
+// The file is now importable for tests, which means `main()` sits behind an entry-point guard.
+// Get that guard wrong and the SessionEnd broker reaper becomes a silent no-op: exit 0, no output,
+// nothing reaped. Nothing else in the suite would notice, so run the file the way hooks.json does.
+test("the SessionEnd hook still runs when invoked the way hooks.json invokes it", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = createBrokerSessionDir();
+  saveBrokerSession(cwd, {
+    endpoint: createBrokerEndpoint(sessionDir),
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: null // nothing to kill; this test is only about whether main() ran at all
+  });
+  assert.notEqual(loadBrokerSession(cwd), null, "precondition: the record exists");
+
+  const hookScript = fileURLToPath(
+    new URL("../plugins/codex/scripts/session-lifecycle-hook.mjs", import.meta.url)
+  ).split(path.sep).join("/"); // exactly how hooks.json spells it
+
+  const result = spawnSync(process.execPath, [hookScript, "SessionEnd"], {
+    input: JSON.stringify({ cwd }),
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(loadBrokerSession(cwd), null, "the hook did not run: broker.json survived");
 
   fs.rmSync(sessionDir, { recursive: true, force: true });
 });
