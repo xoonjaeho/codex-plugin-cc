@@ -57,12 +57,14 @@ import {
   renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
+  storedJobHasOutput,
   renderCancelReport,
   renderJobStatusReport,
   renderSetupReport,
   renderStatusReport,
   renderTaskResult
 } from "./lib/render.mjs";
+import { readLastAssistantMessage } from "./lib/rollout.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
@@ -946,12 +948,18 @@ function handleResult(argv) {
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const storedJob = readStoredJob(workspaceRoot, job.id);
+  // Nothing was stored: the turn may still have produced assistant messages that
+  // only exist in codex's own rollout transcript. Recover the last one so a job
+  // that ended without writing back is not a total loss.
+  const threadId = storedJob?.threadId ?? job.threadId ?? null;
+  const recovered = storedJobHasOutput(storedJob) ? null : readLastAssistantMessage(threadId);
   const payload = {
     job,
-    storedJob
+    storedJob,
+    recovered
   };
 
-  outputCommandResult(payload, renderStoredJobResult(job, storedJob), options.json);
+  outputCommandResult(payload, renderStoredJobResult(job, storedJob, recovered), options.json);
 }
 
 function handleTaskResumeCandidate(argv) {
