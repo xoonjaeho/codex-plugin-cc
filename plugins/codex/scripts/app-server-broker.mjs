@@ -8,6 +8,7 @@ import process from "node:process";
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+import { BROKER_IDLE_MS_ENV } from "./lib/broker-lifecycle.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 
@@ -115,8 +116,38 @@ async function main() {
 
   appClient.setNotificationHandler(routeNotification);
 
+  // Until now a broker exited only on `broker/shutdown` or a signal, so anything that
+  // lost track of one -- a hard-killed parent, a replaced-but-not-killed stale session,
+  // a test run with no teardown -- stranded it and the ~9-process codex stack under it,
+  // forever. An idle broker holds no state worth keeping: a turn keeps its socket open
+  // for its whole duration, so zero sockets means nothing is in flight, and the thread
+  // itself lives in $CODEX_HOME/sessions and is resumable. The next caller respawns one.
+  // The env override exists so a test can watch a real broker exit on its own; 30
+  // minutes is the shipped value.
+  const IDLE_TIMEOUT_MS = Number(process.env[BROKER_IDLE_MS_ENV]) || 30 * 60 * 1000;
+  let idleTimer = null;
+
+  function cancelIdleTimer() {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  }
+
+  function restartIdleTimer(server) {
+    cancelIdleTimer();
+    if (sockets.size > 0) {
+      return;
+    }
+    idleTimer = setTimeout(() => {
+      shutdown(server).finally(() => process.exit(0));
+    }, IDLE_TIMEOUT_MS);
+    idleTimer.unref(); // never hold the process open just to wait for its own exit
+  }
+
   const server = net.createServer((socket) => {
     sockets.add(socket);
+    cancelIdleTimer();
     socket.setEncoding("utf8");
     let buffer = "";
 
@@ -225,11 +256,13 @@ async function main() {
     socket.on("close", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      restartIdleTimer(server);
     });
 
     socket.on("error", () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      restartIdleTimer(server);
     });
   });
 
@@ -243,7 +276,8 @@ async function main() {
     process.exit(0);
   });
 
-  server.listen(listenTarget.path);
+  // Start it now too: a broker nobody ever connects to is exactly the stranded case.
+  server.listen(listenTarget.path, () => restartIdleTimer(server));
 }
 
 main().catch((error) => {
