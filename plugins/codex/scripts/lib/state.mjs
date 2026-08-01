@@ -146,8 +146,85 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return true; // unknown pid -> never treat as dead
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return false; // no such process
+    }
+    return true; // EPERM (process exists, other owner) or anything else -> assume alive
+  }
+}
+
+// A tracked job's completion is written by the launcher process that owns it
+// (see tracked-jobs.mjs::runTrackedJob). If that launcher dies before the turn
+// finishes (cancelled background job, ended session, crash, sleep), the job is
+// frozen at "running"/"queued" with a stale pid forever. Reconcile such orphans
+// to "failed" at read time so /status, /result and /cancel reflect reality.
+function reconcileJobLiveness(jobs) {
+  const changedIds = [];
+  const now = nowIso();
+  const reconciled = jobs.map((job) => {
+    if (job.status !== "running" && job.status !== "queued") {
+      return job;
+    }
+    if (job.pid == null || isProcessAlive(job.pid)) {
+      return job;
+    }
+    changedIds.push(job.id);
+    return {
+      ...job,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      completedAt: job.completedAt ?? now,
+      updatedAt: now,
+      errorMessage:
+        job.errorMessage ??
+        `Codex job orphaned: launcher process (pid ${job.pid}) is no longer running.`
+    };
+  });
+  return { jobs: reconciled, changedIds };
+}
+
+function persistReconciledJobFile(cwd, job) {
+  const jobFile = resolveJobFile(cwd, job.id);
+  if (!fs.existsSync(jobFile)) {
+    return;
+  }
+  let stored;
+  try {
+    stored = readJobFile(jobFile);
+  } catch {
+    return;
+  }
+  writeJobFile(cwd, job.id, {
+    ...stored,
+    status: job.status,
+    phase: job.phase,
+    pid: null,
+    completedAt: stored.completedAt ?? job.completedAt,
+    errorMessage: stored.errorMessage ?? job.errorMessage
+  });
+}
+
 export function listJobs(cwd) {
-  return loadState(cwd).jobs;
+  const state = loadState(cwd);
+  const { jobs, changedIds } = reconcileJobLiveness(state.jobs);
+  if (changedIds.length > 0) {
+    saveState(cwd, { ...state, jobs });
+    for (const job of jobs) {
+      if (changedIds.includes(job.id)) {
+        persistReconciledJobFile(cwd, job);
+      }
+    }
+  }
+  return jobs;
 }
 
 export function setConfig(cwd, key, value) {
