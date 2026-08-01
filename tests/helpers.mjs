@@ -4,8 +4,38 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+import { loadBrokerSession, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
+
+// `ensureBrokerSession` keys the app-server broker by cwd and spawns it detached, and
+// every test here gets a fresh cwd -- so a suite run strands one broker tree per test
+// that reached the app server. A broker exits only on a shutdown RPC or a signal, and
+// the SessionEnd hook that would normally reap it never fires under `npm test`, so
+// nothing else ever will. Reap them, and the mkdtemp dirs, when the test process exits.
+const tempDirs = [];
+
+function reapTempDirs() {
+  for (const dir of tempDirs.splice(0)) {
+    try {
+      const session = loadBrokerSession(dir);
+      if (session) {
+        teardownBrokerSession({ ...session, killProcess: terminateProcessTree });
+      }
+    } catch {
+      // Best effort: a missing or malformed broker session must not fail the run.
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// `exit` only: an interrupted run still leaks, but a signal handler here would also
+// have to re-raise, and every normal run goes through `exit`.
+process.once("exit", reapTempDirs);
+
 export function makeTempDir(prefix = "codex-plugin-test-") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
 }
 
 export function writeExecutable(filePath, source) {
