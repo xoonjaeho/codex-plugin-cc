@@ -117,13 +117,15 @@ test("readLastAssistantMessage falls back to the raw scan when the turn never co
   assert.equal(recovered.complete, false);
 });
 
-// A turn that errored records `task_complete` with an empty `last_agent_message`.
-test("readLastAssistantMessage ignores an empty final message on a failed turn", () => {
+// A turn that errored records `task_complete` with a blank `last_agent_message`.
+test("readLastAssistantMessage ignores a blank final message on a failed turn", () => {
   const sessionsDir = makeTempDir();
   writeRollout(sessionsDir, THREAD_ID, [
     turnStart(TURN_ID),
     assistantRecord("as far as I got"),
-    turnEnd(TURN_ID, "")
+    // Whitespace, not "": an empty string is falsy anyway, so only this catches a
+    // regression in the trim guard.
+    turnEnd(TURN_ID, "   ")
   ]);
 
   const recovered = readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir });
