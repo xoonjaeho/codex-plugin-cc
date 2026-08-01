@@ -6,10 +6,14 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
+// Test-facing override for the broker's idle timeout; the shipped value is in
+// app-server-broker.mjs. It lives here because importing that script runs it.
+export const BROKER_IDLE_MS_ENV = "CODEX_COMPANION_BROKER_IDLE_MS";
 const BROKER_STATE_FILE = "broker.json";
 
 export function createBrokerSessionDir(prefix = "cxc-") {
@@ -99,15 +103,23 @@ export function clearBrokerSession(cwd) {
   }
 }
 
+// A healthy broker answers the first probe immediately, so the second, longer one
+// only costs time when the broker is already in trouble. Without it a merely busy
+// broker on a loaded host misses 150 ms, gets replaced, and its process is stranded.
 async function isBrokerEndpointReady(endpoint) {
   if (!endpoint) {
     return false;
   }
-  try {
-    return await waitForBrokerEndpoint(endpoint, 150);
-  } catch {
-    return false;
+  for (const timeoutMs of [150, 1000]) {
+    try {
+      if (await waitForBrokerEndpoint(endpoint, timeoutMs)) {
+        return true;
+      }
+    } catch {
+      return false;
+    }
   }
+  return false;
 }
 
 export async function ensureBrokerSession(cwd, options = {}) {
@@ -123,7 +135,11 @@ export async function ensureBrokerSession(cwd, options = {}) {
       logFile: existing.logFile ?? null,
       sessionDir: existing.sessionDir ?? null,
       pid: existing.pid ?? null,
-      killProcess: options.killProcess ?? null
+      // Default to actually killing it. This teardown deletes the pid, log and state
+      // files either way, so a broker left running here becomes invisible to every
+      // later reaper -- including the SessionEnd hook, which finds brokers through
+      // the state file this call just cleared.
+      killProcess: options.killProcess ?? terminateProcessTree
     });
     clearBrokerSession(cwd);
   }
@@ -154,7 +170,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
       logFile,
       sessionDir,
       pid: child.pid ?? null,
-      killProcess: options.killProcess ?? null
+      // We spawned this one and it never came up, so it is unambiguously ours to kill.
+      killProcess: options.killProcess ?? terminateProcessTree
     });
     return null;
   }
