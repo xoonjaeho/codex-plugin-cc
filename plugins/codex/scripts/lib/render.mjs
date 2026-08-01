@@ -387,7 +387,20 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderStoredJobResult(job, storedJob) {
+export function storedJobHasOutput(storedJob) {
+  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
+    return true;
+  }
+  if (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) {
+    return true;
+  }
+  if (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) {
+    return true;
+  }
+  return Boolean(storedJob?.rendered);
+}
+
+export function renderStoredJobResult(job, storedJob, recovered = null) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
@@ -438,8 +451,22 @@ export function renderStoredJobResult(job, storedJob) {
     lines.push("", job.errorMessage);
   } else if (storedJob?.errorMessage) {
     lines.push("", storedJob.errorMessage);
-  } else {
+  } else if (!recovered) {
     lines.push("", "No captured result payload was stored for this job.");
+  }
+
+  if (recovered) {
+    // Labelled as partial on purpose: this is the last thing codex said, not a
+    // completed turn. Treat it as an unverified lead, not a verdict.
+    lines.push(
+      "",
+      "## Recovered from the Codex transcript (PARTIAL)",
+      "",
+      "No result was stored for this job, so this is the last assistant message",
+      `codex recorded. The turn may not have finished. Source: ${recovered.file}`,
+      "",
+      recovered.text.trimEnd()
+    );
   }
 
   return `${lines.join("\n").trimEnd()}\n`;
