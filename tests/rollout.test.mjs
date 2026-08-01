@@ -211,6 +211,23 @@ test("renderStoredJobResult drops the PARTIAL label when the turn did finish", (
   assert.doesNotMatch(rendered, /may not have finished/);
 });
 
+// Each early return in renderStoredJobResult is a separate chance to discard the
+// recovered message, and storedJobHasOutput has already decided these count as empty.
+test("renderStoredJobResult never lets a blank stored payload discard the recovery", () => {
+  const job = { id: "job-1", status: "failed", threadId: THREAD_ID };
+  const recovered = { text: "the recovered answer", complete: true, file: "C:/rollout.jsonl" };
+
+  for (const storedJob of [
+    { result: { rawOutput: "\n" } },
+    { result: { codex: { stdout: "   " } } },
+    { rendered: "  \n " },
+    { result: { parseError: null }, rendered: "\t" } // the structured-review branch
+  ]) {
+    const rendered = renderStoredJobResult(job, storedJob, recovered);
+    assert.match(rendered, /the recovered answer/, `discarded for ${JSON.stringify(storedJob)}`);
+  }
+});
+
 test("renderStoredJobResult keeps the empty-payload notice when nothing was recovered", () => {
   const rendered = renderStoredJobResult({ id: "job-1", status: "failed" }, null, null);
 
