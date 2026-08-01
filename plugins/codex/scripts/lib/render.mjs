@@ -409,7 +409,7 @@ export function storedJobHasOutput(storedJob) {
 export function renderStoredJobResult(job, storedJob, recovered = null) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
-  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
+  if (isStructuredReviewStoredResult(storedJob) && hasText(storedJob?.rendered)) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {
       return output;
