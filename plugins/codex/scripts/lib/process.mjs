@@ -71,6 +71,17 @@ function envWithoutMsysPathConversion(env) {
   };
 }
 
+// Signal 0 tests for existence without touching the process. EPERM means it is alive
+// under another owner, so anything but ESRCH counts as still running.
+function processIsGone(pid, killImpl) {
+  try {
+    killImpl(pid, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
+  }
+}
+
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null };
@@ -96,6 +107,16 @@ export function terminateProcessTree(pid, options = {}) {
       (result.status === TASKKILL_PROCESS_NOT_FOUND || looksLikeMissingProcessMessage(combinedOutput))
     ) {
       return { attempted: true, delivered: false, method: "taskkill", result };
+    }
+
+    // `/T` makes taskkill walk the tree, and it exits non-zero when it killed the target
+    // but could not reap one descendant -- "The operation attempted is not supported",
+    // exit 255, which is what a console host or an already-exiting child produces. The
+    // exit code does not separate that from a genuine failure, and the message is
+    // localized, so ask the OS whether the target itself is gone rather than parsing
+    // either. The target being dead is what every caller of this actually asked for.
+    if (!result.error && processIsGone(pid, killImpl)) {
+      return { attempted: true, delivered: true, method: "taskkill", result };
     }
 
     if (result.error?.code === "ENOENT") {
