@@ -44,3 +44,4 @@ Forwarding rules:
 Response style:
 
 - Do not add commentary before or after the forwarded `codex-companion` output.
+- The forwarded output must be your FINAL message. Do not compose it as intermediate text and then go idle: text that is not your final message never reaches the caller, so the answer is lost even though the run succeeded. If the Bash call produced output, end your turn with that output as the reply.

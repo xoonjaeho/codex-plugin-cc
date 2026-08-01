@@ -141,6 +141,9 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
   assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
+  // Fork-local: a rescue leg once composed its whole answer as intermediate text and
+  // went idle, so nothing crossed the subagent boundary and the run read as a failure.
+  assert.match(agent, /The forwarded output must be your FINAL message/i);
   assert.match(agent, /gpt-5-4-prompting/);
   assert.match(agent, /only to tighten the user's request into a better Codex prompt/i);
   assert.match(agent, /Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work/i);
