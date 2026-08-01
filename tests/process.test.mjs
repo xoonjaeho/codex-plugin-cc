@@ -101,16 +101,43 @@ test("terminateProcessTree accepts a taskkill failure whose target is nonetheles
   assert.equal(probedSignal, 0, "the target must be probed, not signalled");
 });
 
-test("terminateProcessTree still throws when taskkill fails and the target is alive", () => {
+// The real failure behind `/codex:cancel`: the turn was just interrupted, so the worker
+// is already terminating and taskkill loses the race with "Access is denied". The target
+// is not gone at the instant taskkill returns -- only a moment later.
+test("terminateProcessTree waits out a target that is still exiting", () => {
+  let probes = 0;
+  const outcome = terminateProcessTree(1234, {
+    platform: "win32",
+    killWaitMs: 500,
+    runCommandImpl(command, args) {
+      return { command, args, status: 1, signal: null, stdout: "", stderr: "오류: 액세스가 거부되었습니다.", error: null };
+    },
+    killImpl() {
+      probes += 1;
+      if (probes < 3) {
+        return true; // still winding down
+      }
+      const error = new Error("no such process");
+      error.code = "ESRCH";
+      throw error;
+    }
+  });
+
+  assert.equal(outcome.delivered, true);
+  assert.ok(probes >= 3, "it gave up after a single probe");
+});
+
+test("terminateProcessTree still throws when taskkill fails and the target stays alive", () => {
   assert.throws(
     () =>
       terminateProcessTree(1234, {
         platform: "win32",
+        killWaitMs: 0,
         runCommandImpl(command, args) {
           return { command, args, status: 1, signal: null, stdout: "", stderr: "Access is denied.", error: null };
         },
         killImpl() {
-          return true; // the probe finds it running
+          return true; // never goes away
         }
       }),
     /Access is denied|taskkill/

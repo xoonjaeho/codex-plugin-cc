@@ -82,6 +82,24 @@ function processIsGone(pid, killImpl) {
   }
 }
 
+// A process that is already on its way out -- taskkill losing the race with a turn that
+// was just interrupted reports "Access is denied", exit 1 -- is still briefly alive, so a
+// single instantaneous probe calls it a failure. Give it a bounded moment to finish.
+// This whole function is synchronous, hence the Atomics sleep rather than a timer.
+function waitForProcessGone(pid, killImpl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const idle = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    if (processIsGone(pid, killImpl)) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    Atomics.wait(idle, 0, 0, Math.min(50, Math.max(1, deadline - Date.now())));
+  }
+}
+
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null };
@@ -109,13 +127,14 @@ export function terminateProcessTree(pid, options = {}) {
       return { attempted: true, delivered: false, method: "taskkill", result };
     }
 
-    // `/T` makes taskkill walk the tree, and it exits non-zero when it killed the target
-    // but could not reap one descendant -- "The operation attempted is not supported",
-    // exit 255, which is what a console host or an already-exiting child produces. The
-    // exit code does not separate that from a genuine failure, and the message is
-    // localized, so ask the OS whether the target itself is gone rather than parsing
-    // either. The target being dead is what every caller of this actually asked for.
-    if (!result.error && processIsGone(pid, killImpl)) {
+    // taskkill exits non-zero in two cases where the target still ends up dead: it killed
+    // the target but could not reap a descendant ("The operation attempted is not
+    // supported", exit 255), and it raced a process that was already terminating
+    // ("Access is denied", exit 1 -- what `cancel` hits after interrupting the turn).
+    // The exit code separates neither from a genuine failure, and both messages are
+    // localized, so ask the OS whether the target is gone instead of parsing either.
+    // That is what every caller of this actually asked for.
+    if (!result.error && waitForProcessGone(pid, killImpl, options.killWaitMs ?? 1000)) {
       return { attempted: true, delivered: true, method: "taskkill", result };
     }
 
