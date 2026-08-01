@@ -8,7 +8,7 @@ import process from "node:process";
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
-import { BROKER_IDLE_MS_ENV } from "./lib/broker-lifecycle.mjs";
+import { BROKER_IDLE_MS_ENV, clearBrokerSession, loadBrokerSession } from "./lib/broker-lifecycle.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 
@@ -140,6 +140,20 @@ async function main() {
       return;
     }
     idleTimer = setTimeout(() => {
+      // Drop our own `broker.json` first. `ensureBrokerSession` would probe and repair
+      // it, but the `reuseExistingBroker` callers -- auth status and turn interrupt --
+      // read the stored endpoint without probing, so a record left pointing at this
+      // dead socket turns into an app-server failure for them instead of the direct
+      // spawn they fall back to when there is no record at all.
+      // Match on the endpoint, not the pid: a replacement broker may already own this
+      // cwd, and pids get recycled.
+      try {
+        if (loadBrokerSession(cwd)?.endpoint === endpoint) {
+          clearBrokerSession(cwd);
+        }
+      } catch {
+        // A racing writer must not turn the idle exit into a crash.
+      }
       shutdown(server).finally(() => process.exit(0));
     }, IDLE_TIMEOUT_MS);
     idleTimer.unref(); // never hold the process open just to wait for its own exit
