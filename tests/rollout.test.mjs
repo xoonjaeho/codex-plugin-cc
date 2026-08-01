@@ -8,12 +8,24 @@ import { readLastAssistantMessage } from "../plugins/codex/scripts/lib/rollout.m
 import { renderStoredJobResult, storedJobHasOutput } from "../plugins/codex/scripts/lib/render.mjs";
 
 const THREAD_ID = "019fbad1-b569-7d93-97be-1efbff2b73b2";
+const TURN_ID = "019fbad1-c711-7051-b5bd-5665f2da3919";
+const LATER_TURN_ID = "019fbb1d-a711-7051-b5bd-5665f2da3919";
 
 function assistantRecord(text) {
   return {
     type: "response_item",
     payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] }
   };
+}
+
+// The turn markers codex actually writes: only these carry `turn_id`, and the
+// assistant records between them carry none.
+function turnStart(turnId) {
+  return { type: "event_msg", payload: { type: "task_started", turn_id: turnId } };
+}
+
+function turnEnd(turnId) {
+  return { type: "event_msg", payload: { type: "task_complete", turn_id: turnId } };
 }
 
 // Mirrors a real transcript: nested <sessions>/<YYYY>/<MM>/<DD>/rollout-<ts>-<threadId>.jsonl
@@ -26,10 +38,11 @@ function writeRollout(sessionsDir, threadId, records) {
   return file;
 }
 
-test("readLastAssistantMessage returns the last assistant message, not the first", () => {
+test("readLastAssistantMessage returns the last assistant message of the turn, not the first", () => {
   const sessionsDir = makeTempDir();
   writeRollout(sessionsDir, THREAD_ID, [
     { type: "session_meta", payload: { id: THREAD_ID } },
+    turnStart(TURN_ID),
     assistantRecord("first pass, still investigating"),
     { type: "response_item", payload: { type: "reasoning", content: [{ text: "thinking" }] } },
     { type: "response_item", payload: { type: "custom_tool_call", payload: {} } },
@@ -37,38 +50,72 @@ test("readLastAssistantMessage returns the last assistant message, not the first
     { type: "event_msg", payload: { type: "token_count" } }
   ]);
 
-  const recovered = readLastAssistantMessage(THREAD_ID, { sessionsDir });
+  const recovered = readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir });
 
   assert.equal(recovered.text, "VERDICT: the lease is never released on cancellation");
   assert.equal(path.basename(recovered.file).endsWith(`-${THREAD_ID}.jsonl`), true);
 });
 
-test("readLastAssistantMessage survives the half-written final line a killed turn leaves", () => {
+// `--resume-last` reuses a thread, so a newer job appends its turn to the same
+// transcript. Recovering the older job must not hand back the newer job's answer.
+test("readLastAssistantMessage ignores turns belonging to another job on the same thread", () => {
   const sessionsDir = makeTempDir();
-  const file = writeRollout(sessionsDir, THREAD_ID, [assistantRecord("the recoverable answer")]);
-  fs.appendFileSync(file, '{"type":"response_item","payload":{"type":"mess', "utf8");
+  writeRollout(sessionsDir, THREAD_ID, [
+    { type: "session_meta", payload: { id: THREAD_ID } },
+    turnStart(TURN_ID),
+    assistantRecord("the answer this job produced"),
+    turnEnd(TURN_ID),
+    turnStart(LATER_TURN_ID),
+    assistantRecord("a later job's answer"),
+    turnEnd(LATER_TURN_ID)
+  ]);
 
-  assert.equal(readLastAssistantMessage(THREAD_ID, { sessionsDir }).text, "the recoverable answer");
+  assert.equal(
+    readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir }).text,
+    "the answer this job produced"
+  );
+  assert.equal(
+    readLastAssistantMessage(THREAD_ID, { turnId: LATER_TURN_ID, sessionsDir }).text,
+    "a later job's answer"
+  );
 });
 
-test("readLastAssistantMessage returns null when no transcript matches the thread id", () => {
+test("readLastAssistantMessage survives the half-written final line a killed turn leaves", () => {
   const sessionsDir = makeTempDir();
-  writeRollout(sessionsDir, "some-other-thread", [assistantRecord("not this one")]);
+  const file = writeRollout(sessionsDir, THREAD_ID, [
+    turnStart(TURN_ID),
+    assistantRecord("the recoverable answer")
+  ]);
+  fs.appendFileSync(file, '{"type":"response_item","payload":{"type":"mess', "utf8");
 
-  assert.equal(readLastAssistantMessage(THREAD_ID, { sessionsDir }), null);
-  assert.equal(readLastAssistantMessage("", { sessionsDir }), null);
-  assert.equal(readLastAssistantMessage(null, { sessionsDir }), null);
+  assert.equal(
+    readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir }).text,
+    "the recoverable answer"
+  );
+});
+
+test("readLastAssistantMessage returns null without a matching thread id or turn id", () => {
+  const sessionsDir = makeTempDir();
+  writeRollout(sessionsDir, "some-other-thread", [turnStart(TURN_ID), assistantRecord("not this one")]);
+
+  assert.equal(readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir }), null);
+  assert.equal(readLastAssistantMessage("", { turnId: TURN_ID, sessionsDir }), null);
+  assert.equal(readLastAssistantMessage(null, { turnId: TURN_ID, sessionsDir }), null);
+  // No turn id: the job's turn cannot be identified, so nothing is safe to return.
+  assert.equal(readLastAssistantMessage("some-other-thread", { sessionsDir }), null);
+  assert.equal(readLastAssistantMessage("some-other-thread", { turnId: null, sessionsDir }), null);
 });
 
 test("readLastAssistantMessage returns null when the transcript holds no assistant text", () => {
   const sessionsDir = makeTempDir();
   writeRollout(sessionsDir, THREAD_ID, [
     { type: "session_meta", payload: { id: THREAD_ID } },
+    turnStart(TURN_ID),
     { type: "response_item", payload: { type: "message", role: "user", content: [{ text: "go" }] } },
     assistantRecord("   ")
   ]);
 
-  assert.equal(readLastAssistantMessage(THREAD_ID, { sessionsDir }), null);
+  assert.equal(readLastAssistantMessage(THREAD_ID, { turnId: TURN_ID, sessionsDir }), null);
 });
 
 test("storedJobHasOutput distinguishes a stored result from an empty one", () => {

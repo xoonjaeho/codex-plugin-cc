@@ -923,7 +923,10 @@ function handleResult(argv) {
   // only exist in codex's own rollout transcript. Recover the last one so a job
   // that ended without writing back is not a total loss.
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
-  const recovered = storedJobHasOutput(storedJob) ? null : readLastAssistantMessage(threadId);
+  const turnId = storedJob?.turnId ?? job.turnId ?? null;
+  const recovered = storedJobHasOutput(storedJob)
+    ? null
+    : readLastAssistantMessage(threadId, { turnId });
   const payload = {
     job,
     storedJob,
