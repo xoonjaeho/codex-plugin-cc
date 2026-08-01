@@ -80,7 +80,10 @@ test("continue is not exposed as a user-facing command", () => {
     "review.md",
     "setup.md",
     "status.md",
-    "transfer.md"
+    "transfer.md",
+    // Fork-local: /codex:usage, carried in this fork only (see commands/usage.md).
+    // Upstream has no such command -- never send this line in a PR.
+    "usage.md"
   ]);
 });
 
