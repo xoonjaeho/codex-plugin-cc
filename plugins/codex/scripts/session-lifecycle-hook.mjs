@@ -139,7 +139,20 @@ async function main() {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// `process.argv[1]` is resolved to an absolute path but never through symlinks, while
+// `import.meta.url` always is. A plugin root reached through a symlink -- what a locally
+// linked install looks like -- makes the two differ, and comparing them literally would
+// skip `main()` and turn SessionStart/SessionEnd into a silent no-op. Compare what the
+// two paths actually point at, and fall back to the literal check if either is unreadable.
+function invokedAsEntryPoint() {
+  try {
+    return fs.realpathSync(process.argv[1] ?? "") === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return process.argv[1] === fileURLToPath(import.meta.url);
+  }
+}
+
+if (invokedAsEntryPoint()) {
   main().catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(1);
