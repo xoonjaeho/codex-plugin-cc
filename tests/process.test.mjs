@@ -66,7 +66,11 @@ test("terminateProcessTree treats exit code 128 as already stopped on a non-Engl
 
   assert.equal(outcome.attempted, true);
   assert.equal(outcome.delivered, false);
-  assert.equal(outcome.treeConfirmed, true, "there was no process, so no tree is in doubt");
+  assert.equal(
+    outcome.treeConfirmed,
+    false,
+    "a root that is already gone says nothing about the children it left behind"
+  );
   assert.equal(outcome.method, "taskkill");
 });
 
