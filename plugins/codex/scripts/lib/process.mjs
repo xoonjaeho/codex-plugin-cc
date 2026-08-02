@@ -125,7 +125,12 @@ export function terminateProcessTree(pid, options = {}) {
       !result.error &&
       (result.status === TASKKILL_PROCESS_NOT_FOUND || looksLikeMissingProcessMessage(combinedOutput))
     ) {
-      return { attempted: true, delivered: false, treeConfirmed: true, method: "taskkill", result };
+      // "No such process" is about the root at this instant, not about what it spawned
+      // while it was alive. A worker that died mid-turn leaves its `codex app-server`
+      // child orphaned, and with the root gone `/T` has nothing left to walk from. That
+      // is not a corner case here: `cancel` only reaches this branch for a job the state
+      // still calls running, which is exactly the crashed-worker case.
+      return { attempted: true, delivered: false, treeConfirmed: false, method: "taskkill", result };
     }
 
     // taskkill exits non-zero both after failing to reap a descendant ("The operation
@@ -137,8 +142,8 @@ export function terminateProcessTree(pid, options = {}) {
     // But a non-zero taskkill never establishes that the REST of the tree went with it,
     // and `/T` leaves no way to enumerate what survived once the root is gone. So the
     // two facts are reported separately -- `delivered` is about the target, and
-    // `treeConfirmed` is about everything under it. This is the one branch that cannot
-    // account for the whole tree.
+    // `treeConfirmed` is about everything under it. Like the missing-root branch above,
+    // this one cannot account for the whole tree.
     if (!result.error && waitForProcessGone(pid, killImpl, options.killWaitMs ?? 1000)) {
       return { attempted: true, delivered: true, treeConfirmed: false, method: "taskkill", result };
     }
