@@ -237,14 +237,18 @@ export async function ensureBrokerSession(cwd, options = {}) {
 
   const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
   if (!ready) {
+    // We spawned this one, but the endpoint wait runs out its full timeout even when the
+    // child died immediately -- `codex app-server` failing at startup does exactly that --
+    // and node reaps the child, so by now the pid can belong to somebody else. A child
+    // node still holds open is the one case where the pid is unambiguously ours.
+    const childStillRunning = child.exitCode === null && child.signalCode === null;
     teardownBrokerSession({
       endpoint,
       pidFile,
       logFile,
       sessionDir,
       pid: child.pid ?? null,
-      // We spawned this one and it never came up, so it is unambiguously ours to kill.
-      killProcess: terminateBrokerProcess
+      killProcess: childStillRunning ? terminateBrokerProcess : null
     });
     return null;
   }

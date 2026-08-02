@@ -277,6 +277,32 @@ test("session end does not kill a broker pid whose start time does not match", a
   assert.equal(loadBrokerSession(cwd), null, "the stale session record survived");
 });
 
+// The endpoint wait does not watch the child, so a broker that dies at startup still
+// costs the full timeout -- and node reaps it, freeing the pid for the whole window.
+test("a broker that dies before its endpoint opens is not killed by pid", async () => {
+  const cwd = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+
+  const scriptDir = makeTempDir();
+  const scriptPath = path.join(scriptDir, "broker-that-exits.mjs");
+  fs.writeFileSync(scriptPath, "process.exit(1);\n", "utf8");
+
+  const killedPids = [];
+  const session = await ensureBrokerSession(cwd, {
+    scriptPath,
+    env: buildEnv(binDir),
+    timeoutMs: 2000,
+    killProcess(pid) {
+      killedPids.push(pid);
+    }
+  });
+
+  assert.equal(session, null, "a broker that never came up was reported ready");
+  assert.deepEqual(killedPids, [], "a reaped pid was killed");
+  assert.equal(loadBrokerSession(cwd), null, "a failed spawn left a session record");
+});
+
 test("process start-time probes are bounded and timeouts are unverifiable", () => {
   let captured = null;
   const timeoutError = new Error("probe timed out");
