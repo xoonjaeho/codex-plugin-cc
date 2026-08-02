@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
@@ -395,4 +396,46 @@ test("the SessionEnd hook still runs when invoked the way hooks.json invokes it"
   assert.equal(loadBrokerSession(cwd), null, "the hook did not run: broker.json survived");
 
   fs.rmSync(sessionDir, { recursive: true, force: true });
+});
+
+// Reaching the same script through a symlinked plugin root gives `process.argv[1]` the
+// link path while `import.meta.url` resolves to the target, so an entry-point guard that
+// compares the two literally stops running the hook at all -- silently, since a hook that
+// exits 0 without doing anything looks exactly like a hook with nothing to do.
+test("the SessionEnd hook still runs when its plugin root is a symlink", async () => {
+  const cwd = makeTempDir();
+  const sessionDir = createBrokerSessionDir();
+  saveBrokerSession(cwd, {
+    endpoint: createBrokerEndpoint(sessionDir),
+    pidFile: path.join(sessionDir, "broker.pid"),
+    logFile: path.join(sessionDir, "broker.log"),
+    sessionDir,
+    pid: null // nothing to kill; this test is only about whether main() ran at all
+  });
+
+  const scriptsDir = fileURLToPath(new URL("../plugins/codex/scripts", import.meta.url));
+  // Deliberately not under `makeTempDir`: its exit reaper deletes recursively, and a link
+  // to the real scripts directory is not something to hand a recursive delete.
+  const linkParent = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-link-"));
+  const linkRoot = path.join(linkParent, "scripts");
+  fs.symlinkSync(scriptsDir, linkRoot, "junction"); // "junction" is ignored off Windows
+
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(linkRoot, "session-lifecycle-hook.mjs"), "SessionEnd"],
+      { input: JSON.stringify({ cwd }), encoding: "utf8" }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(loadBrokerSession(cwd), null, "the hook did not run through the symlink");
+  } finally {
+    try {
+      fs.unlinkSync(linkRoot);
+    } catch {
+      fs.rmdirSync(linkRoot); // Windows removes a junction this way, target untouched
+    }
+    fs.rmSync(linkParent, { recursive: true, force: true });
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+  }
 });
