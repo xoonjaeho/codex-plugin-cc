@@ -148,3 +148,22 @@ Do not invent failure modes that are not supported by the examples.
 Before finalizing, make sure the revised prompt resolves the cited failure modes without adding contradictory instructions.
 </verification_loop>
 ```
+
+## Stable inspect packet (14/14)
+
+Use the whole template; no single element has been isolated as load-bearing.
+
+- Run foreground: `task --prompt-file <abs>`
+- Keep the prompt file to ~2–3 KB
+- Give the commit sha and let codex `git show` it; never inline a diff or point at a working tree
+- Name the changed files
+- Ask 4–6 questions
+- Cap the answer: "answer in UNDER 500 WORDS"
+- Permit trivial OK answers: "If a question exposes no defect, answer OK plus one line"
+- Ban graphify and saved workflows explicitly:
+  - "Do NOT run the graphify workflow / build or read a project graph"
+  - "Do not use any saved or prior workflow, skill, or checklist for this repository"
+- Frame as "inspect this commit and answer N questions", never "review"
+- State up front what is already settled
+- Make every question answerable from the named files
+- "get line numbers with `rg -n` or `git diff`; do NOT count by hand"

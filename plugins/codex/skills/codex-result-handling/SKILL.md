@@ -19,3 +19,15 @@ When the helper returns Codex output:
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
 - If the helper reports malformed output or a failed Codex run, include the most actionable stderr lines and stop there instead of guessing.
 - If the helper reports that setup or authentication is required, direct the user to `/codex:setup` and do not improvise alternate auth flows.
+
+## Stall recovery
+
+Codex sometimes exits 0 with log-only stdout and no verdict; `status --all` shows the job running forever. Recovery, in order of cost:
+
+1. **Plain retry of the identical packet** (~2 min, has worked repeatedly).
+2. **Shrunk retry** — fewer files or simpler questions.
+3. **`result <job-id>`**, which reads the job's own turn out of the rollout transcript.
+
+Do not poll, do not kill. Flat output for 2–4 min is reasoning; startup silence here has exceeded 13 min.
+
+Do not read truncated `Assistant message captured:` previews as findings — a fragment cannot tell you which half is sound.
