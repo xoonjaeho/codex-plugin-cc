@@ -93,7 +93,7 @@ test("rescue command absorbs continue semantics", () => {
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
   const runtimeSkill = read("skills/codex-cli-runtime/SKILL.md");
 
-  assert.match(rescue, /The final user-visible response must be Codex's output verbatim/i);
+  assert.match(rescue, /The final user-visible response must contain the Codex output body verbatim/i);
   assert.match(rescue, /allowed-tools:\s*Bash\(node:\*\),\s*AskUserQuestion,\s*Agent/);
   // Regression for #234: `Skill(codex:rescue)` from the main agent recursed
   // because rescue.md named the routing with ambiguous prose ("Route this
@@ -108,7 +108,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /--resume\|--fresh/);
   assert.match(rescue, /--model <model\|spark>/);
   assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh>/);
-  assert.match(rescue, /task-resume-candidate --json/);
+  assert.match(rescue, /task-resume-candidate --cwd <repo> --json/);
   assert.match(rescue, /AskUserQuestion/);
   assert.match(rescue, /Continue current Codex thread/);
   assert.match(rescue, /Start a new Codex thread/);
@@ -123,15 +123,15 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /If the user chooses continue, add `--resume`/i);
   assert.match(rescue, /If the user chooses a new thread, add `--fresh`/i);
   assert.match(rescue, /thin forwarder only/i);
-  assert.match(rescue, /Return the Codex companion stdout verbatim to the user/i);
+  assert.match(rescue, /Return the Codex output body verbatim to the user/i);
   assert.match(rescue, /Do not paraphrase, summarize, rewrite, or add commentary before or after it/i);
-  assert.match(rescue, /return that command's stdout as-is/i);
+  assert.match(rescue, /return the Codex output body/i);
   assert.match(rescue, /Leave `--resume` and `--fresh` in the forwarded request/i);
   assert.match(agent, /--resume/);
   assert.match(agent, /--fresh/);
   assert.match(agent, /thin forwarding wrapper/i);
   assert.match(agent, /prefer foreground for a small, clearly bounded rescue request/i);
-  assert.match(agent, /If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution/i);
+  assert.match(agent, /Never use background execution to stretch this wrapper around a long task/i);
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
@@ -139,15 +139,15 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /Leave model unset by default/i);
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
-  assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
+  assert.match(agent, /Return the Codex output body/i);
   assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
   // Fork-local: a rescue leg once composed its whole answer as intermediate text and
   // went idle, so nothing crossed the subagent boundary and the run read as a failure.
-  assert.match(agent, /The forwarded output must be your FINAL message/i);
+  assert.match(agent, /The Codex output body must be your FINAL message/i);
   assert.match(agent, /gpt-5-4-prompting/);
   assert.match(agent, /only to tighten the user's request into a better Codex prompt/i);
   assert.match(agent, /Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work/i);
-  assert.match(runtimeSkill, /only job is to invoke `task` once and return that stdout unchanged/i);
+  assert.match(runtimeSkill, /only job is to invoke `task` once and return the Codex output body/i);
   assert.match(runtimeSkill, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
   assert.match(runtimeSkill, /use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt/i);
   assert.match(runtimeSkill, /That prompt drafting is the only Claude-side work allowed/i);
@@ -198,8 +198,8 @@ test("internal docs use task terminology for rescue runs", () => {
   const promptingSkill = read("skills/gpt-5-4-prompting/SKILL.md");
   const promptRecipes = read("skills/gpt-5-4-prompting/references/codex-prompt-recipes.md");
 
-  assert.match(runtimeSkill, /codex-companion\.mjs" task "<raw arguments>"/);
-  assert.match(runtimeSkill, /Use `task` for every rescue request/i);
+  assert.match(runtimeSkill, /codex-companion\.mjs" task --cwd <repo> --prompt-file <path>/);
+  assert.match(runtimeSkill, /Use `task` for every accepted bounded rescue request/i);
   assert.match(runtimeSkill, /task --resume-last/i);
   assert.match(promptingSkill, /Use `task` when the task is diagnosis/i);
   assert.match(promptRecipes, /Codex task prompts/i);

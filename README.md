@@ -125,16 +125,19 @@ This command is read-only. It does not fix code.
 
 ### `/codex:rescue`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
+Hands one bounded, non-write, non-review task to Codex through the `codex:codex-rescue` subagent.
 
 Use it when you want Codex to:
 
 - investigate a bug
-- try a fix
 - continue a previous Codex task
 - take a faster or cheaper pass with a smaller model
 
 > [!NOTE]
+> `/codex:rescue` is bounded and non-write. For a fix that edits files, a long run, or a review, use the main-session Bash companion directly instead — the subagent rejects plainly long, write, or review packets and returns the matching companion pointer:
+> ```bash
+> node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --write --cwd <repo> --prompt-file <path>
+> ```
 > Depending on the task and the model you choose these tasks might take a long time and it's generally recommended to force the task to be in the background or move the agent to the background.
 
 It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--resume` and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
@@ -143,10 +146,9 @@ Examples:
 
 ```bash
 /codex:rescue investigate why the tests started failing
-/codex:rescue fix the failing test with the smallest safe patch
-/codex:rescue --resume apply the top fix from the last run
+/codex:rescue --resume continue the last investigation
 /codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
+/codex:rescue --model spark investigate the regression quickly
 /codex:rescue --background investigate the regression
 ```
 
