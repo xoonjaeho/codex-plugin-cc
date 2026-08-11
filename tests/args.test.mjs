@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { parseArgs } from "../plugins/codex/scripts/lib/args.mjs";
+import { parseArgs, splitRawArgumentString } from "../plugins/codex/scripts/lib/args.mjs";
 import { makeTempDir, run, initGitRepo } from "./helpers.mjs";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import fs from "node:fs";
@@ -37,6 +37,18 @@ test("parseArgs keeps unknown options as positionals by default", () => {
   });
   assert.deepEqual(options, {});
   assert.deepEqual(positionals, ["--not-a-flag", "hello"]);
+});
+
+test("raw positional prompts preserve Windows backslashes through argument parsing", () => {
+  const prompt = "Inspect C:\\Users\\Administrator\\.claude\\plans\\subagent-bugs-drain.html";
+  const { positionals } = parseArgs(splitRawArgumentString("\"" + prompt + "\""));
+
+  assert.deepEqual(positionals, [prompt]);
+});
+
+test("backslash escapes a following quote or backslash in a raw positional", () => {
+  const { positionals } = parseArgs(splitRawArgumentString('"focus on \\"quoted\\" and a\\\\b"'));
+  assert.deepEqual(positionals, ['focus on "quoted" and a\\b']);
 });
 
 test("task --help prints usage and does not dispatch a Codex thread", () => {

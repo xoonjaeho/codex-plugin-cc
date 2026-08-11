@@ -86,17 +86,20 @@ export function splitRawArgumentString(raw) {
   const tokens = [];
   let current = "";
   let quote = null;
-  let escaping = false;
 
-  for (const character of raw) {
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
-    }
-
+  for (let i = 0; i < raw.length; i++) {
+    const character = raw[i];
     if (character === "\\") {
-      escaping = true;
+      // Backslash escapes only a quote or another backslash; any other
+      // following character (e.g. a Windows path separator) stays literal,
+      // so `C:\Users\...` survives while `\"` and `\\` still escape.
+      const next = raw[i + 1];
+      if (next === "\"" || next === "\\" || next === "'") {
+        current += next;
+        i += 1;
+        continue;
+      }
+      current += character;
       continue;
     }
 
@@ -123,10 +126,6 @@ export function splitRawArgumentString(raw) {
     }
 
     current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
   }
 
   if (current) {
