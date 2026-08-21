@@ -7,6 +7,12 @@ import { spawnSync } from "node:child_process";
 import { loadBrokerSession, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
 
+// A Claude Code session exports CODEX_COMPANION_SESSION_ID, and `status`/`result` filter jobs by it --
+// so an inherited value hides every fixture job and the suite fails only when run from inside a session.
+// Tests build their env as `{ ...process.env, CODEX_COMPANION_SESSION_ID: "sess-..." }`, so dropping it
+// here leaves explicit per-test ids untouched.
+delete process.env.CODEX_COMPANION_SESSION_ID;
+
 // `ensureBrokerSession` keys the app-server broker by cwd and spawns it detached, and
 // every test here gets a fresh cwd -- so a suite run strands one broker tree per test
 // that reached the app server. A broker exits only on a shutdown RPC or a signal, and
