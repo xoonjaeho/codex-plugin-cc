@@ -396,6 +396,27 @@ function hasText(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+// A `--write` turn that exits 0 having edited nothing looks exactly like success:
+// the caller reads a normal final message and only finds out from `git status`.
+// Built here rather than inside renderTaskResult because that function returns
+// rawOutput early and verbatim whenever it is non-empty -- a warning added there
+// would fire only when codex said nothing at all, which is the opposite case.
+export function noFileEditsWarning(write, touchedFiles, exitStatus = 0) {
+  // A turn that FAILED also edits nothing, and telling its caller to "check git
+  // status before re-dispatching" is wrong advice on top of an error they can
+  // already see. Only a turn that completed normally is the confusing case.
+  if (!write || exitStatus !== 0 || (touchedFiles?.length ?? 0) > 0) {
+    return null;
+  }
+  return (
+    "WARNING: codex reported no file edits in this --write turn. It exited normally, " +
+    "so this is not a crash -- check `git status` before paying for a re-dispatch, and " +
+    "prefer `task --resume-last --write` over a fresh run. Caveat: this counts codex's " +
+    "own file-change events only, so a write performed by a shell command it ran does " +
+    "not show up here."
+  );
+}
+
 export function storedJobHasOutput(storedJob) {
   if (isStructuredReviewStoredResult(storedJob) && hasText(storedJob?.rendered)) {
     return true;
@@ -425,7 +446,11 @@ export function renderStoredJobResult(job, storedJob, recovered = null) {
     (hasText(storedJob?.result?.codex?.stdout) && storedJob.result.codex.stdout) ||
     "";
   if (rawOutput) {
-    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    // rawOutput wins over `rendered` below, so a warning that lives only in the
+    // rendered text is invisible through `result <job-id>`. Carry it separately.
+    const warning = hasText(storedJob?.result?.warning) ? `${storedJob.result.warning}\n\n` : "";
+    const body = `${warning}${rawOutput}`;
+    const output = body.endsWith("\n") ? body : `${body}\n`;
     if (!threadId) {
       return output;
     }

@@ -716,7 +716,14 @@ test("write task output focuses on the Codex result without generic follow-up hi
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
+  // The anti-boilerplate intent is intact and still exact-matched: the ONLY thing
+  // allowed past the Codex body is the no-file-edits warning, which fires here
+  // because the fake codex emits no fileChange events for this --write turn.
+  assert.match(result.stdout, /reported no file edits/);
+  assert.equal(
+    result.stdout.replace(/\n+WARNING: codex reported no file edits[\s\S]*$/, "\n"),
+    "Handled the requested task.\nTask prompt accepted.\n"
+  );
 });
 
 test("task --resume acts like --resume-last without leaking the flag into the prompt", () => {
@@ -1537,7 +1544,12 @@ test("result for a finished write-capable task returns the raw Codex final respo
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Handled the requested task\.\nTask prompt accepted\.\n/);
+  // The fake codex reports no file edits, so `result` leads with the warning and the
+  // Codex body follows. Both must be present: a warning that reaches only the
+  // foreground render and not `result` is the exact bug this ordering guards against,
+  // because rawOutput wins over `rendered` in renderStoredJobResult.
+  assert.match(result.stdout, /^WARNING: codex reported no file edits/);
+  assert.match(result.stdout, /Handled the requested task\.\nTask prompt accepted\.\n/);
   assert.match(result.stdout, /Codex session ID: thr_[a-z0-9]+/i);
   assert.match(result.stdout, /Resume in Codex: codex resume thr_[a-z0-9]+/i);
 });

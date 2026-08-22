@@ -62,7 +62,8 @@ import {
   renderJobStatusReport,
   renderSetupReport,
   renderStatusReport,
-  renderTaskResult
+  renderTaskResult,
+  noFileEditsWarning
 } from "./lib/render.mjs";
 import { readLastAssistantMessage } from "./lib/rollout.mjs";
 
@@ -512,7 +513,7 @@ async function executeTaskRun(request) {
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
-  const rendered = renderTaskResult(
+  const baseRendered = renderTaskResult(
     {
       rawOutput,
       failureMessage,
@@ -524,12 +525,17 @@ async function executeTaskRun(request) {
       write: Boolean(request.write)
     }
   );
+  const warning = noFileEditsWarning(Boolean(request.write), result.touchedFiles, result.status);
+  const rendered = warning ? `${baseRendered}
+${warning}
+` : baseRendered;
   const payload = {
     status: result.status,
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    ...(warning ? { warning } : {})
   };
 
   return {
