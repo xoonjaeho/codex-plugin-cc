@@ -4,8 +4,11 @@ argument-hint: ''
 allowed-tools: Bash(python:*), Bash(py:*)
 ---
 
-Show codex rate-limit usage. Codex has no usage API; the numbers come from the newest
-`token_count` snapshot in the local rollout logs under `~/.codex/sessions/`. Purely local.
+Show codex rate-limit usage. The numbers are read **live** from
+`chatgpt.com/backend-api/codex/usage`, authenticated with the ChatGPT OAuth token codex
+already stores in `~/.codex/auth.json` — so there is no separate login or cookie to set up.
+If that read fails, the reader falls back to the newest local rollout snapshot under
+`~/.codex/sessions/` and marks it stale.
 
 The reader lives outside this plugin (in `~/.claude/scripts/`) so it survives plugin
 updates. Run it (use `py -3` if `python` is missing):
@@ -14,10 +17,12 @@ updates. Run it (use `py -3` if `python` is missing):
 python "$HOME/.claude/scripts/codex_usage.py" read --json
 ```
 
-Interpret the JSON:
-- `ok: true` → report each window: `primary` (~5h) and `secondary` (weekly) as `used` / `remaining` %, with `reset_at` (epoch) rendered as time-until, plus the `plan`.
-  - **Staleness matters:** the figures are a snapshot from codex's last run. If a window has `expired: true`, that window already reset since the snapshot (no codex calls since → it's effectively fresh again), so don't report its old `used` as current. `age_sec` is the snapshot's age; flag it if large.
-- `ok: false` → no snapshot found: no recent codex session has run, so there is no usage to read yet. Tell the user to run a codex task and try again; nothing to set up.
+Interpret the JSON — `stale` says whether the numbers are current, the exit code says why:
+- `ok: true` + `stale: false` (exit 0) → live numbers. Report each window: `primary` (~5h) and `secondary` (weekly) as `used` / `remaining` %, with `reset_at` (epoch) rendered as time-until, plus the `plan`.
+- `ok: true` + `stale: true` (exit 5 or 6) → the live read failed; these are codex's last local snapshot, **not current**. Report them as cached, pass on `reason`, and flag `age_sec` if large. A window with `expired: true` already reset since that snapshot, so don't present its `used` as current.
+- `ok: false` (exit 5 or 8) → the live read failed and there is no local snapshot to fall back on either. Report `reason`. Note the exit code is 5 here, not 8, when the cause was credentials — read `need_login`, not the code, to decide what to tell the user.
+- `need_login: true` (exit 5, with or without `ok`) → the stored codex credentials are missing or expired. Tell the user to run `codex login`; nothing else to set up. **Any other refusal** (HTTP 403 and friends) comes back as exit 6 with the status in `reason` — do not send the user to `codex login` for those.
+- exit 2 is argparse rejecting the arguments; no JSON is printed.
 
 Keep the reply to one or two lines. For a plain (non-JSON) rendering run
-`python "$HOME/.claude/scripts/codex_usage.py" read` — it already renders expiry and snapshot age.
+`python "$HOME/.claude/scripts/codex_usage.py" read` — it already renders resets, staleness and snapshot age.
