@@ -1,6 +1,6 @@
 ---
 name: codex-rescue
-description: Forward one bounded non-write, non-review rescue task to Codex through the shared runtime
+description: Forward one bounded non-write, non-review rescue task to Codex through the shared runtime. Do not route write, review, or plainly multi-minute packets here — those go to the main-session Bash companion. Do not use it for work the main Claude thread can finish quickly on its own.
 model: sonnet
 tools: Bash
 skills:
@@ -61,7 +61,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --cwd <repo> --pro
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the Codex output body, or at minimum `job.summary` plus parsed findings. Never return only a forwarding stub.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- If the Bash call fails or Codex cannot be invoked, say so in one line and stop.
 
 Response style:
 

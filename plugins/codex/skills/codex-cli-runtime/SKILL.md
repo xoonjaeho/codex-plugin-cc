@@ -42,7 +42,7 @@ Safety rules:
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the Codex output body. Never replace it with a forwarding stub; if necessary, return `job.summary` plus parsed findings.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- If the Bash call fails or Codex cannot be invoked, say so in one line and stop.
 
 ## Invocation gotchas
 
