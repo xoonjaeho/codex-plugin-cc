@@ -778,6 +778,91 @@ test("task --resume acts like --resume-last without leaking the flag into the pr
   assert.equal(fakeState.lastTurnStart.prompt, "follow up");
 });
 
+test("task --resume-job resumes the named job's thread, not the newest one", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const olderRun = run("node", [SCRIPT, "task", "older task"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(olderRun.status, 0, olderRun.stderr);
+
+  const newerRun = run("node", [SCRIPT, "task", "newer task"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(newerRun.status, 0, newerRun.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const olderJob = state.jobs.find((job) => job.threadId === "thr_1");
+  assert.ok(olderJob, "expected the older task job to record threadId thr_1");
+
+  const result = run("node", [SCRIPT, "task", "--resume-job", olderJob.id, "continue"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.threadId, "thr_1");
+  assert.equal(fakeState.lastTurnStart.prompt, "continue");
+});
+
+test("task --resume-job with an unknown job id fails with a clear message", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--resume-job", "task-does-not-exist", "continue"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No task job task-does-not-exist found for this repository\./);
+});
+
+test("task --resume-job rejects combining with --resume-last", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const job = state.jobs.find((candidate) => candidate.threadId === "thr_1");
+  assert.ok(job, "expected a completed task job");
+
+  const result = run("node", [SCRIPT, "task", "--resume-job", job.id, "--resume-last", "continue"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Choose either --resume-job or --resume\/--resume-last\./);
+});
+
 test("task --fresh is treated as routing control and does not leak into the prompt", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
