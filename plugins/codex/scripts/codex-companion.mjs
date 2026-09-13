@@ -691,15 +691,19 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+function spawnDetachedTaskWorker(cwd, jobId, logFile) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
+  const stderrFd = logFile ? fs.openSync(logFile, "a") : "ignore";
   const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     cwd,
     env: process.env,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", stderrFd],
     windowsHide: true
   });
+  if (typeof stderrFd === "number") {
+    fs.closeSync(stderrFd);
+  }
   child.unref();
   return child;
 }
@@ -715,7 +719,7 @@ function enqueueBackgroundTask(cwd, job, request) {
     logFile,
     request
   };
-  const child = persistQueuedJobAndSpawn(job.workspaceRoot, queuedRecord, () => spawnDetachedTaskWorker(cwd, job.id));
+  const child = persistQueuedJobAndSpawn(job.workspaceRoot, queuedRecord, () => spawnDetachedTaskWorker(cwd, job.id, logFile));
 
   return {
     payload: {
@@ -864,6 +868,41 @@ async function handleTransfer(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
+// Startup failures happen before runTrackedJob owns the job record, so without
+// this the stored job never learns why the worker died.
+function recordTaskWorkerStartupFailure(workspaceRoot, jobId, error) {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const completedAt = nowIso();
+  const existing = readStoredJob(workspaceRoot, jobId);
+  if (existing) {
+    writeJobFile(workspaceRoot, jobId, {
+      ...existing,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage,
+      completedAt
+    });
+    appendLogLine(existing.logFile, errorMessage);
+    upsertJob(workspaceRoot, {
+      id: jobId,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage,
+      completedAt
+    });
+    return;
+  }
+  upsertJob(workspaceRoot, {
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    errorMessage,
+    completedAt
+  });
+}
+
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
@@ -873,16 +912,23 @@ async function handleTaskWorker(argv) {
     throw new Error("Missing required --job-id for task-worker.");
   }
 
+  const jobId = options["job-id"];
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
-  if (!storedJob) {
-    throw new Error(`No stored job found for ${options["job-id"]}.`);
-  }
-
-  const request = storedJob.request;
-  if (!request || typeof request !== "object") {
-    throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
+  let storedJob;
+  let request;
+  try {
+    storedJob = readStoredJob(workspaceRoot, jobId);
+    if (!storedJob) {
+      throw new Error(`No stored job found for ${jobId}.`);
+    }
+    request = storedJob.request;
+    if (!request || typeof request !== "object") {
+      throw new Error(`Stored job ${jobId} is missing its task request payload.`);
+    }
+  } catch (error) {
+    recordTaskWorkerStartupFailure(workspaceRoot, jobId, error);
+    throw error;
   }
 
   const { logFile, progress } = createTrackedProgress(

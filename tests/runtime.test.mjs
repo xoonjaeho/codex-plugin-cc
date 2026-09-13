@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveStateDir, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { createJobLogFile } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -1001,6 +1002,54 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.equal(resultPayload.job.id, launchPayload.jobId);
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+});
+
+test("task-worker startup failure marks the stored job failed and lands in the job log", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const pluginDataDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  const env = buildEnv(binDir);
+  try {
+    const jobId = "task-startup-failure";
+    const logFile = createJobLogFile(repo, jobId, "Startup failure probe");
+    writeJobFile(repo, jobId, {
+      id: jobId,
+      title: "Startup failure probe",
+      status: "queued",
+      phase: "queued",
+      logFile
+    });
+
+    const worker = run("node", [SCRIPT, "task-worker", "--cwd", repo, "--job-id", jobId], {
+      cwd: repo,
+      env
+    });
+
+    assert.equal(worker.status, 1);
+
+    const statusResult = run("node", [SCRIPT, "status", jobId, "--json"], {
+      cwd: repo,
+      env
+    });
+    assert.equal(statusResult.status, 0, statusResult.stderr);
+    const statusPayload = JSON.parse(statusResult.stdout);
+    assert.equal(statusPayload.job.id, jobId);
+    assert.equal(statusPayload.job.status, "failed");
+    assert.match(statusPayload.job.errorMessage, /missing its task request payload/);
+
+    const logContents = fs.readFileSync(logFile, "utf8");
+    assert.match(logContents, /missing its task request payload/);
+  } finally {
+    if (previousPluginDataDir === undefined) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
+    }
+  }
 });
 
 test("review rejects focus text because it is native-review only", () => {
