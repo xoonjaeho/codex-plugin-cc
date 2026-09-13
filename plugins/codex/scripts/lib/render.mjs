@@ -481,12 +481,29 @@ export function renderStoredJobResult(job, storedJob, recovered = null) {
     lines.push(`Summary: ${job.summary}`);
   }
 
+  const partialText =
+    !recovered && hasText(storedJob?.partialOutput?.text) ? storedJob.partialOutput.text : null;
+
   if (job.errorMessage) {
     lines.push("", job.errorMessage);
   } else if (storedJob?.errorMessage) {
     lines.push("", storedJob.errorMessage);
-  } else if (!recovered) {
+  } else if (!recovered && !partialText) {
     lines.push("", "No captured result payload was stored for this job.");
+  }
+
+  if (partialText) {
+    // Rollout recovery (recovered) is more complete and wins; this is the fallback
+    // when no rollout file exists either -- the streamed capture is all that is left.
+    lines.push(
+      "",
+      "## Last assistant message (PARTIAL)",
+      "",
+      "No result was stored for this job, so this is the last assistant message",
+      "captured before the job stopped. Source: in-process progress capture.",
+      "",
+      partialText.trimEnd()
+    );
   }
 
   if (recovered) {

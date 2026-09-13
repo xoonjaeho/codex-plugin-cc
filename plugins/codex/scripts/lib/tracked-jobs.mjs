@@ -95,11 +95,20 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       changed = true;
     }
 
-    if (!changed) {
+    // Root-thread assistant text only ("Subagent <x> message" titles are excluded):
+    // stream it into the job file so a launcher that dies mid-run leaves a usable
+    // last message behind. Never stored in `result` or the state index -- that would
+    // make storedJobHasOutput true and suppress the fuller rollout recovery.
+    const hasPartialOutput =
+      normalized.logTitle === "Assistant message" && Boolean(normalized.logBody?.trim());
+
+    if (!changed && !hasPartialOutput) {
       return;
     }
 
-    upsertJob(workspaceRoot, patch);
+    if (changed) {
+      upsertJob(workspaceRoot, patch);
+    }
 
     const jobFile = resolveJobFile(workspaceRoot, jobId);
     if (!fs.existsSync(jobFile)) {
@@ -109,7 +118,10 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     const storedJob = readJobFile(jobFile);
     writeJobFile(workspaceRoot, jobId, {
       ...storedJob,
-      ...patch
+      ...patch,
+      ...(hasPartialOutput
+        ? { partialOutput: { text: normalized.logBody, capturedAt: nowIso() } }
+        : {})
     });
   };
 }

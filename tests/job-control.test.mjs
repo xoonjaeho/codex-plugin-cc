@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { makeTempDir } from "./helpers.mjs";
 import { upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { persistQueuedJobAndSpawn, readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
+import { createJobProgressUpdater } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
 function runWithPluginData(callback) {
   const pluginDataDir = makeTempDir();
@@ -75,5 +76,35 @@ test("persistQueuedJobAndSpawn records the spawned pid when the job is still que
     const stored = readStoredJob(workspace, queuedRecord.id);
     assert.equal(stored.status, "queued");
     assert.equal(stored.pid, 4242);
+  });
+});
+
+test("createJobProgressUpdater streams root assistant text into partialOutput", () => {
+  runWithPluginData(() => {
+    const workspace = makeTempDir();
+    const record = { ...makeQueuedRecord(workspace), id: "job-partial", status: "running" };
+    writeJobFile(workspace, record.id, record);
+    const updater = createJobProgressUpdater(workspace, record.id);
+
+    updater({ message: "x", logTitle: "Assistant message", logBody: "full answer text" });
+
+    const stored = readStoredJob(workspace, record.id);
+    assert.equal(stored.partialOutput?.text, "full answer text");
+    assert.ok(stored.partialOutput?.capturedAt);
+  });
+});
+
+test("createJobProgressUpdater does not let subagent messages overwrite partialOutput", () => {
+  runWithPluginData(() => {
+    const workspace = makeTempDir();
+    const record = { ...makeQueuedRecord(workspace), id: "job-partial-sub", status: "running" };
+    writeJobFile(workspace, record.id, record);
+    const updater = createJobProgressUpdater(workspace, record.id);
+
+    updater({ message: "x", logTitle: "Assistant message", logBody: "full answer text" });
+    updater({ message: "x", logTitle: "Subagent worker message", logBody: "subagent noise" });
+
+    const stored = readStoredJob(workspace, record.id);
+    assert.equal(stored.partialOutput?.text, "full answer text");
   });
 });

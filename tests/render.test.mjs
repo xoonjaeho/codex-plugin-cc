@@ -95,3 +95,26 @@ test("renderStoredJobResult surfaces the no-edits warning above raw output", () 
     "the warning must precede the body, not trail it where it scrolls away"
   );
 });
+
+test("renderStoredJobResult falls back to partialOutput when nothing else was captured", () => {
+  const output = renderStoredJobResult(
+    { id: "job-1", status: "failed", title: "Codex Task" },
+    { partialOutput: { text: "half done", capturedAt: "2026-09-13T00:00:00.000Z" } },
+    null
+  );
+
+  assert.match(output, /half done/);
+  assert.match(output, /PARTIAL/);
+  assert.doesNotMatch(output, /No captured result payload was stored/);
+});
+
+test("renderStoredJobResult prefers rollout recovery over partialOutput", () => {
+  const output = renderStoredJobResult(
+    { id: "job-2", status: "failed", title: "Codex Task" },
+    { partialOutput: { text: "half done", capturedAt: "2026-09-13T00:00:00.000Z" } },
+    { complete: false, text: "recovered rollout text", file: "rollout.json" }
+  );
+
+  assert.match(output, /recovered rollout text/);
+  assert.doesNotMatch(output, /half done/);
+});
