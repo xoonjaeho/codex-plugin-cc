@@ -90,7 +90,125 @@ function removeFileIfExists(filePath) {
   }
 }
 
+const STATE_LOCK_WAIT_MS = 5000;
+const STATE_LOCK_STALE_MS = 30000;
+const heldStateLocks = new Map(); // lock path -> { depth, token } for this process
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Windows: a file another process is creating or deleting fails transiently with these.
+function isTransientFsError(error) {
+  return error?.code === "EPERM" || error?.code === "EACCES" || error?.code === "EBUSY";
+}
+
+// Returns null when the lock file is gone (or stays unreadable through a few retries).
+function readLockOwner(lockPath) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const raw = fs.readFileSync(lockPath, "utf8");
+      const mtimeMs = fs.statSync(lockPath).mtimeMs;
+      let owner = {};
+      try {
+        owner = JSON.parse(raw);
+      } catch {
+        // Created but not yet filled in by its owner -> unknown pid.
+      }
+      return { raw, pid: owner?.pid, token: owner?.token, mtimeMs };
+    } catch (error) {
+      if (error?.code === "ENOENT" || (isTransientFsError(error) && attempt >= 4)) {
+        return null;
+      }
+      if (!isTransientFsError(error)) {
+        throw error;
+      }
+      sleepSync(10);
+    }
+  }
+}
+
+// Serializes every read-modify-write of state.json across processes (foreground
+// companion, detached task workers, status polling, hooks). Without it a process
+// saving an older snapshot drops jobs another process just added -- and saveState's
+// prune then deletes their job files and logs. Re-entrant within one process.
+export function withStateLock(cwd, fn, { waitMs = STATE_LOCK_WAIT_MS, staleMs = STATE_LOCK_STALE_MS } = {}) {
+  const lockPath = `${resolveStateFile(cwd)}.lock`;
+  const held = heldStateLocks.get(lockPath);
+  if (held) {
+    held.depth += 1;
+    try {
+      return fn();
+    } finally {
+      held.depth -= 1;
+    }
+  }
+
+  ensureStateDir(cwd);
+  const token = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+  const startedAt = Date.now();
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(lockPath, "wx");
+    } catch (error) {
+      if (error?.code !== "EEXIST" && !isTransientFsError(error)) {
+        throw error;
+      }
+      const owner = readLockOwner(lockPath);
+      if (owner) {
+        const ownerDead = Number.isInteger(owner.pid) && !isProcessAlive(owner.pid);
+        if (ownerDead || Date.now() - owner.mtimeMs > staleMs) {
+          // Only remove the lock we judged stale, not one a racing process just re-created.
+          let removed = true;
+          if (readLockOwner(lockPath)?.raw === owner.raw) {
+            try {
+              removeFileIfExists(lockPath);
+            } catch (removeError) {
+              if (!isTransientFsError(removeError) && removeError?.code !== "ENOENT") {
+                throw removeError;
+              }
+              removed = removeError?.code === "ENOENT";
+            }
+          }
+          if (removed) {
+            continue;
+          }
+        }
+      }
+      if (Date.now() - startedAt >= waitMs) {
+        throw new Error(
+          `Timed out after ${waitMs}ms waiting for the Codex state lock ${lockPath} (held by pid ${owner?.pid ?? "unknown"}).`
+        );
+      }
+      sleepSync(10 + Math.floor(Math.random() * 15));
+      continue;
+    }
+    try {
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, token }));
+    } finally {
+      fs.closeSync(fd);
+    }
+    break;
+  }
+
+  heldStateLocks.set(lockPath, { depth: 1, token });
+  try {
+    return fn();
+  } finally {
+    heldStateLocks.delete(lockPath);
+    const owner = readLockOwner(lockPath);
+    if (owner?.token === token) {
+      removeFileIfExists(lockPath);
+    }
+  }
+}
+
 export function saveState(cwd, state) {
+  return withStateLock(cwd, () => saveStateLocked(cwd, state));
+}
+
+function saveStateLocked(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
   const nextJobs = pruneJobs(state.jobs ?? []);
@@ -117,9 +235,11 @@ export function saveState(cwd, state) {
 }
 
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  return withStateLock(cwd, () => {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveStateLocked(cwd, state);
+  });
 }
 
 export function generateJobId(prefix = "job") {
@@ -215,17 +335,25 @@ function persistReconciledJobFile(cwd, job) {
 }
 
 export function listJobs(cwd) {
-  const state = loadState(cwd);
-  const { jobs, changedIds } = reconcileJobLiveness(state.jobs);
-  if (changedIds.length > 0) {
-    saveState(cwd, { ...state, jobs });
-    for (const job of jobs) {
-      if (changedIds.includes(job.id)) {
-        persistReconciledJobFile(cwd, job);
+  const { jobs, changedIds } = reconcileJobLiveness(loadState(cwd).jobs);
+  if (changedIds.length === 0) {
+    return jobs;
+  }
+  // Something needs persisting: redo the read under the lock so the save cannot
+  // overwrite jobs another process added since the unlocked read.
+  return withStateLock(cwd, () => {
+    const state = loadState(cwd);
+    const reconciled = reconcileJobLiveness(state.jobs);
+    if (reconciled.changedIds.length > 0) {
+      saveStateLocked(cwd, { ...state, jobs: reconciled.jobs });
+      for (const job of reconciled.jobs) {
+        if (reconciled.changedIds.includes(job.id)) {
+          persistReconciledJobFile(cwd, job);
+        }
       }
     }
-  }
-  return jobs;
+    return reconciled.jobs;
+  });
 }
 
 export function setConfig(cwd, key, value) {

@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir } from "./helpers.mjs";
-import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, upsertJob, withStateLock, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -273,4 +275,118 @@ test("saveState retries a transient rename failure and applies the new state", (
     ["second"]
   );
   assert.deepEqual(listTmpFiles(path.dirname(stateFile)), []);
+});
+
+test("a state lock left behind by a dead process does not block upsertJob", () => {
+  const workspace = makeTempDir();
+  const lockPath = `${resolveStateFile(workspace)}.lock`;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, token: "crashed" }), "utf8");
+
+  upsertJob(workspace, { id: "after-crash", status: "queued", workspaceRoot: workspace });
+
+  const indexedIds = JSON.parse(fs.readFileSync(resolveStateFile(workspace), "utf8")).jobs.map((job) => job.id);
+  assert.deepEqual(indexedIds, ["after-crash"]);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("a state lock held by a live process past the wait budget throws and is left in place", () => {
+  const workspace = makeTempDir();
+  const lockPath = `${resolveStateFile(workspace)}.lock`;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const heldLock = JSON.stringify({ pid: process.pid, token: "someone-else" });
+  fs.writeFileSync(lockPath, heldLock, "utf8");
+
+  let ran = false;
+  assert.throws(
+    () =>
+      withStateLock(
+        workspace,
+        () => {
+          ran = true;
+        },
+        { waitMs: 200 }
+      ),
+    /Timed out after 200ms waiting for the Codex state lock .*held by pid \d+/
+  );
+  assert.equal(ran, false);
+  assert.equal(fs.readFileSync(lockPath, "utf8"), heldLock);
+});
+
+test("state lock is re-entrant within one process and released afterwards", () => {
+  const workspace = makeTempDir();
+  const lockPath = `${resolveStateFile(workspace)}.lock`;
+
+  withStateLock(workspace, () => {
+    assert.equal(fs.existsSync(lockPath), true);
+    upsertJob(workspace, { id: "nested", status: "queued", workspaceRoot: workspace });
+  });
+
+  assert.equal(fs.existsSync(lockPath), false);
+  assert.deepEqual(listJobs(workspace).map((job) => job.id), ["nested"]);
+});
+
+test("concurrent upsertJob calls from separate processes keep every job and its file", async () => {
+  // Without a cross-process lock, one process saves a stale snapshot over another's new
+  // job, and saveState's prune then deletes that job's file as "no longer indexed".
+  const workspace = makeTempDir();
+  const pluginDataDir = makeTempDir();
+  const goFile = path.join(pluginDataDir, "go");
+  const stateModuleUrl = pathToFileURL(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../plugins/codex/scripts/lib/state.mjs")
+  ).href;
+  const workers = 2;
+  const jobsPerWorker = 12;
+
+  const runWorker = (worker) =>
+    new Promise((resolve, reject) => {
+      const code = `
+        import fs from "node:fs";
+        const { upsertJob, writeJobFile } = await import(${JSON.stringify(stateModuleUrl)});
+        const workspace = ${JSON.stringify(workspace)};
+        while (!fs.existsSync(${JSON.stringify(goFile)})) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        }
+        for (let index = 0; index < ${jobsPerWorker}; index++) {
+          const id = "w${worker}-" + index;
+          writeJobFile(workspace, id, { id, status: "completed", workspaceRoot: workspace });
+          upsertJob(workspace, { id, status: "completed", workspaceRoot: workspace });
+        }
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", code], {
+        env: { ...process.env, CLAUDE_PLUGIN_DATA: pluginDataDir },
+        stdio: ["ignore", "ignore", "pipe"]
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      child.on("error", reject);
+      child.on("exit", (exitCode) => resolve({ exitCode, stderr }));
+    });
+
+  const pending = Array.from({ length: workers }, (_, worker) => runWorker(worker));
+  fs.writeFileSync(goFile, "", "utf8");
+  const results = await Promise.all(pending);
+  for (const result of results) {
+    assert.equal(result.exitCode, 0, result.stderr);
+  }
+
+  const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  try {
+    const expectedIds = Array.from({ length: workers }, (_, worker) =>
+      Array.from({ length: jobsPerWorker }, (_, index) => `w${worker}-${index}`)
+    ).flat();
+    const indexedIds = JSON.parse(fs.readFileSync(resolveStateFile(workspace), "utf8")).jobs.map((job) => job.id);
+    assert.deepEqual([...indexedIds].sort(), [...expectedIds].sort());
+    const missingJobFiles = expectedIds.filter((id) => !fs.existsSync(resolveJobFile(workspace, id)));
+    assert.deepEqual(missingJobFiles, []);
+  } finally {
+    if (previousPluginDataDir == null) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
+    }
+  }
 });
