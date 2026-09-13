@@ -1143,14 +1143,24 @@ export async function runAppServerTurn(cwd, options = {}) {
       { onProgress: options.onProgress }
     );
 
+    // A task turn can report `completed` after emitting only preamble; without a
+    // root-thread final_answer there is no result, so it must not exit 0.
+    const missingFinalAnswer = turnState.finalTurn?.status === "completed" && !turnState.finalAnswerSeen;
+    const missingFinalAnswerError = missingFinalAnswer
+      ? { message: "Codex turn completed without a final answer (only non-final assistant messages were emitted)." }
+      : null;
+    if (missingFinalAnswerError) {
+      emitProgress(options.onProgress, `Codex error: ${missingFinalAnswerError.message}`, "failed");
+    }
+
     return {
-      status: buildResultStatus(turnState),
+      status: missingFinalAnswer ? 1 : buildResultStatus(turnState),
       threadId,
       turnId: turnState.turnId,
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
-      error: turnState.error,
+      error: turnState.error ?? missingFinalAnswerError,
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),

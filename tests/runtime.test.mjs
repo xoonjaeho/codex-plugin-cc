@@ -354,6 +354,24 @@ test("task reports the actual Codex auth error when the run is rejected", () => 
   assert.match(result.stderr, /authentication expired; run codex login/);
 });
 
+test("task fails when the turn completes without a final answer", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "preamble-only");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "check preamble only"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex turn completed without a final answer/);
+});
+
 test("review accepts the quoted raw argument style for built-in base-branch review", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

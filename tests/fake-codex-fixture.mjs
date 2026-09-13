@@ -581,7 +581,7 @@ rl.on("line", (line) => {
             ]
             : []),
           {
-            completed: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" }
+            completed: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: BEHAVIOR === "preamble-only" ? "commentary" : "final_answer" }
           }
         ];
 
