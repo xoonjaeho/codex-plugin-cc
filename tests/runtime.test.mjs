@@ -16,6 +16,12 @@ const SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
 
+function buildSetupEnv(binDir) {
+  const env = buildEnv(binDir);
+  delete env.CLAUDE_PLUGIN_DATA;
+  return env;
+}
+
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -34,7 +40,7 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: buildSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0);
@@ -71,7 +77,7 @@ test("setup trusts app-server API key auth even when login status alone would fa
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: buildSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -89,7 +95,7 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: buildSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -107,7 +113,7 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: buildSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -125,7 +131,7 @@ test("setup reports not ready when app-server config read fails", () => {
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: buildSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
