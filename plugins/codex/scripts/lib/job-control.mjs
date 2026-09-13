@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -186,6 +186,23 @@ export function readStoredJob(workspaceRoot, jobId) {
     return null;
   }
   return readJobFile(jobFile);
+}
+
+export function persistQueuedJobAndSpawn(workspaceRoot, queuedRecord, spawnWorker) {
+  const recordWithoutPid = { ...queuedRecord, pid: null };
+  writeJobFile(workspaceRoot, queuedRecord.id, recordWithoutPid);
+  upsertJob(workspaceRoot, recordWithoutPid);
+
+  const child = spawnWorker();
+
+  const current = readStoredJob(workspaceRoot, queuedRecord.id);
+  if (current?.status === "queued") {
+    // ponytail: a read-then-write window remains until state updates take a cross-process lock.
+    const recordWithPid = { ...current, pid: child?.pid ?? null };
+    writeJobFile(workspaceRoot, queuedRecord.id, recordWithPid);
+    upsertJob(workspaceRoot, recordWithPid);
+  }
+  return child;
 }
 
 function matchJobReference(jobs, reference, predicate = () => true) {

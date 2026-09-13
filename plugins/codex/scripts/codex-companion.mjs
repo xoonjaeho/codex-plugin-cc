@@ -37,6 +37,7 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  persistQueuedJobAndSpawn,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -707,17 +708,14 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
     logFile,
     request
   };
-  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
+  const child = persistQueuedJobAndSpawn(job.workspaceRoot, queuedRecord, () => spawnDetachedTaskWorker(cwd, job.id));
 
   return {
     payload: {
