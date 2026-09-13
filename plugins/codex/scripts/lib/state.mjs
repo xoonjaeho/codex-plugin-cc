@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+import { writeJsonFile } from "./fs.mjs";
 
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -111,7 +112,7 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeJsonFile(resolveStateFile(cwd), nextState);
   return nextState;
 }
 
@@ -243,7 +244,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeJsonFile(jobFile, payload);
   return jobFile;
 }
 

@@ -15,7 +15,33 @@ export function readJsonFile(filePath) {
 }
 
 export function writeJsonFile(filePath, value) {
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const contents = `${JSON.stringify(value, null, 2)}\n`;
+  const tmpFile = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    fs.writeFileSync(tmpFile, contents, "utf8");
+    // Windows: rename over a file another process holds open fails transiently
+    // with EPERM/EACCES/EBUSY -- retry a few times before giving up.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        fs.renameSync(tmpFile, filePath);
+        return;
+      } catch (error) {
+        const transient =
+          error?.code === "EPERM" || error?.code === "EACCES" || error?.code === "EBUSY";
+        if (!transient || attempt >= 4) {
+          throw error;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+    }
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      // best effort cleanup
+    }
+    throw error;
+  }
 }
 
 export function safeReadFile(filePath) {

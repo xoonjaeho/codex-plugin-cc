@@ -185,3 +185,92 @@ test("listJobs does not reconcile jobs without a pid or already-finished jobs", 
   assert.equal(jobs.find((job) => job.id === "no-pid").status, "queued");
   assert.equal(jobs.find((job) => job.id === "done").status, "completed");
 });
+
+function listTmpFiles(dir) {
+  return fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => name.endsWith(".tmp")) : [];
+}
+
+test("writeJobFile writes the payload atomically and leaves no temp file", () => {
+  const workspace = makeTempDir();
+  const payload = { id: "atomic", status: "running", workspaceRoot: workspace };
+
+  const jobFile = writeJobFile(workspace, "atomic", payload);
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(jobFile, "utf8")), payload);
+  assert.equal(fs.readFileSync(jobFile, "utf8").endsWith("}\n"), true);
+  assert.deepEqual(listTmpFiles(path.dirname(jobFile)), []);
+});
+
+test("saveState leaves no temp file behind", () => {
+  const workspace = makeTempDir();
+  const stateFile = resolveStateFile(workspace);
+  const first = { id: "first", status: "completed", workspaceRoot: workspace };
+  const second = { id: "second", status: "completed", workspaceRoot: workspace };
+
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [first] });
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [second] });
+
+  const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.deepEqual(
+    savedState.jobs.map((job) => job.id),
+    ["second"]
+  );
+  assert.deepEqual(listTmpFiles(path.dirname(stateFile)), []);
+});
+
+test("saveState keeps the previous state file when the atomic rename fails", () => {
+  const workspace = makeTempDir();
+  const stateFile = resolveStateFile(workspace);
+  const first = { id: "first", status: "completed", workspaceRoot: workspace };
+  const second = { id: "second", status: "completed", workspaceRoot: workspace };
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [first] });
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = () => {
+    throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+  };
+  try {
+    assert.throws(() => {
+      saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [second] });
+    });
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.deepEqual(
+    savedState.jobs.map((job) => job.id),
+    ["first"]
+  );
+  assert.deepEqual(listTmpFiles(path.dirname(stateFile)), []);
+});
+
+test("saveState retries a transient rename failure and applies the new state", () => {
+  const workspace = makeTempDir();
+  const stateFile = resolveStateFile(workspace);
+  const first = { id: "first", status: "completed", workspaceRoot: workspace };
+  const second = { id: "second", status: "completed", workspaceRoot: workspace };
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [first] });
+
+  const originalRename = fs.renameSync;
+  let thrownOnce = false;
+  fs.renameSync = (...args) => {
+    if (!thrownOnce) {
+      thrownOnce = true;
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    }
+    return originalRename(...args);
+  };
+  try {
+    saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [second] });
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.deepEqual(
+    savedState.jobs.map((job) => job.id),
+    ["second"]
+  );
+  assert.deepEqual(listTmpFiles(path.dirname(stateFile)), []);
+});
