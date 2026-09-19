@@ -160,9 +160,7 @@ Use the whole template; no single element has been isolated as load-bearing.
 - Ask 4–6 questions
 - Cap the answer: "answer in UNDER 500 WORDS"
 - Permit trivial OK answers: "If a question exposes no defect, answer OK plus one line"
-- Ban graphify and saved workflows explicitly:
-  - "Do NOT run the graphify workflow / build or read a project graph"
-  - "Do not use any saved or prior workflow, skill, or checklist for this repository"
+- Ban saved workflows explicitly: "Do not use any saved or prior workflow, skill, or checklist for this repository"
 - Frame as "inspect this commit and answer N questions", never "review"
 - State up front what is already settled
 - Make every question answerable from the named files

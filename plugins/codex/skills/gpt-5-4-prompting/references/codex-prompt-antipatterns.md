@@ -116,7 +116,7 @@ Better:
 Launch codex first and let it finish, then fan out kimi/glm.
 ```
 
-## Letting graphify or saved workflows auto-trigger
+## Letting saved workflows auto-trigger
 
 Bad:
 
@@ -125,14 +125,13 @@ Review this change for correctness issues.
 ```
 
 Why it stalls:
-Codex's own copy of the `graphify` skill auto-triggers on the word "review", and banning it by name is not sufficient — codex also re-enters its own prior repo-specific review workflow.
+The word "review" makes codex re-enter its own prior repo-specific review workflow.
 
 Better:
 
 ```text
 Inspect this commit and answer N questions.
 
-Do NOT run the graphify workflow / build or read a project graph.
 Do not use any saved or prior workflow, skill, or checklist for this repository.
 ```
 
