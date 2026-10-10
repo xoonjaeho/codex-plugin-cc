@@ -24,5 +24,5 @@ Interpret the JSON — `stale` says whether the numbers are current, the exit co
 - `need_login: true` (exit 5, with or without `ok`) → the stored codex credentials are missing or expired. Tell the user to run `codex login`; nothing else to set up. **Any other refusal** (HTTP 403 and friends) comes back as exit 6 with the status in `reason` — do not send the user to `codex login` for those.
 - exit 2 is argparse rejecting the arguments; no JSON is printed.
 
-Keep the reply to one or two lines. For a plain (non-JSON) rendering run
+Report only the window numbers, the plan and any staleness note. For a plain (non-JSON) rendering run
 `python "$HOME/.claude/scripts/codex_usage.py" read` — it already renders resets, staleness and snapshot age.

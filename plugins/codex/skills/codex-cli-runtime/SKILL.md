@@ -74,6 +74,6 @@ node ".../codex-companion.mjs" result <job-id> --cwd <repo> --json | python -c "
 
 Never accept a Codex verification line. Re-run the suite yourself after every Codex round in one Bash call. Give the packet the absolute interpreter path, not a relative one, and state the expected baseline counts so a divergent skip count is a warning, not an environmental caveat. "N failed, but environmental" is unverified until run in the real environment.
 
-## Exit-0 recovery
+## Caller-side exit-0 recovery
 
 `task --write` can exit 0 after only reading. Exit 0 with an empty diff is not success. Recover with `task --resume-last --write --cwd <repo>` and a prompt whose first line is `Stop analysing. Your first action must be an edit`. Resume carries the dead run's reads, so it is cheaper than a new dispatch.
