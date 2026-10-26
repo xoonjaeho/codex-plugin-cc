@@ -23,6 +23,7 @@ Interpret the JSON — `stale` says whether the numbers are current, the exit co
 - `ok: false` (exit 5 or 8) → the live read failed and there is no local snapshot to fall back on either. Report `reason`. Note the exit code is 5 here, not 8, when the cause was credentials — read `need_login`, not the code, to decide what to tell the user.
 - `need_login: true` (exit 5, with or without `ok`) → the stored codex credentials are missing or expired. Tell the user to run `codex login`; nothing else to set up. **Any other refusal** (HTTP 403 and friends) comes back as exit 6 with the status in `reason` — do not send the user to `codex login` for those.
 - exit 2 is argparse rejecting the arguments; no JSON is printed.
+- `reset_credits` (live reads only) → `available` reset credits and how many are `applicable` now; mention them when non-zero. Listing or spending them is `/codex:reset`.
 
 Report only the window numbers, the plan and any staleness note. For a plain (non-JSON) rendering run
 `python "$HOME/.claude/scripts/codex_usage.py" read` — it already renders resets, staleness and snapshot age.

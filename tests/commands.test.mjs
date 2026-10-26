@@ -76,6 +76,8 @@ test("continue is not exposed as a user-facing command", () => {
     "adversarial-review.md",
     "cancel.md",
     "rescue.md",
+    // Fork-local: /codex:reset, the reset-credit half of /codex:usage. Never upstream.
+    "reset.md",
     "result.md",
     "review.md",
     "setup.md",
