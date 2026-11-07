@@ -33,7 +33,9 @@ python "$HOME/.claude/scripts/codex_usage.py" reset --yes --json
 Interpret the exit code:
 - 0 → listed, or `outcome` `reset` / `already_redeemed`; report `via` and the fresh
   windows in `after` (or `after_error` if that re-read failed — the spend still happened).
-- 3 → `outcome` `nothing_to_reset` or `no_credit`; nothing was spent.
+- 3 → `outcome` `nothing_to_reset` or `no_credit`; nothing was spent. If the JSON
+  carries `hint`, pass it on verbatim: a window can read 100% before codex refuses a
+  request, and no credit applies until it does.
 - 5 → `need_login`; tell the user to run `codex login`.
 - 6 → both the HTTP and the app-server consume failed; pass on `reason` verbatim and
   re-run step 1 before any retry, since the credit list shows whether it was spent.
