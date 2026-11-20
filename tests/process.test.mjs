@@ -173,3 +173,41 @@ test("terminateProcessTree treats missing Windows processes as already stopped",
   assert.equal(outcome.result.status, 128);
   assert.match(outcome.result.stdout, /not found/i);
 });
+
+// A pid that is not a process-group leader makes the group kill fail with ESRCH while the
+// pid itself is alive; SessionEnd and cancel must still stop it.
+test("terminateProcessTree falls back to the pid when its process group does not exist", () => {
+  const calls = [];
+  const outcome = terminateProcessTree(1234, {
+    platform: "linux",
+    killImpl(pid, signal) {
+      calls.push([pid, signal]);
+      if (pid < 0) {
+        const error = new Error("no such process group");
+        error.code = "ESRCH";
+        throw error;
+      }
+      return true;
+    }
+  });
+
+  assert.deepEqual(calls, [[-1234, "SIGTERM"], [1234, "SIGTERM"]]);
+  assert.equal(outcome.delivered, true);
+  assert.equal(outcome.method, "process");
+  assert.equal(outcome.treeConfirmed, false, "a pid-only kill cannot account for its children");
+});
+
+test("terminateProcessTree reports nothing delivered when neither the group nor the pid exists", () => {
+  const outcome = terminateProcessTree(1234, {
+    platform: "linux",
+    killImpl() {
+      const error = new Error("no such process");
+      error.code = "ESRCH";
+      throw error;
+    }
+  });
+
+  assert.equal(outcome.attempted, true);
+  assert.equal(outcome.delivered, false);
+  assert.equal(outcome.treeConfirmed, true);
+});

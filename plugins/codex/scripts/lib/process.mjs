@@ -171,19 +171,17 @@ export function terminateProcessTree(pid, options = {}) {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, treeConfirmed: true, method: "process-group" };
   } catch (error) {
-    if (error?.code !== "ESRCH") {
-      try {
-        killImpl(pid, "SIGTERM");
-        return { attempted: true, delivered: true, treeConfirmed: true, method: "process" };
-      } catch (innerError) {
-        if (innerError?.code === "ESRCH") {
-          return { attempted: true, delivered: false, treeConfirmed: true, method: "process" };
-        }
-        throw innerError;
+    // ESRCH on the group can just mean pid is not a group leader, so the pid itself may
+    // still be alive; killed alone, its children are not covered.
+    try {
+      killImpl(pid, "SIGTERM");
+      return { attempted: true, delivered: true, treeConfirmed: error?.code !== "ESRCH", method: "process" };
+    } catch (innerError) {
+      if (innerError?.code === "ESRCH") {
+        return { attempted: true, delivered: false, treeConfirmed: true, method: "process" };
       }
+      throw innerError;
     }
-
-    return { attempted: true, delivered: false, treeConfirmed: true, method: "process-group" };
   }
 }
 

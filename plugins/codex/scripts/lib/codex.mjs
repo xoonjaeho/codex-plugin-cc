@@ -535,7 +535,10 @@ function applyTurnNotification(state, message) {
       }
       break;
     case "error":
-      state.error = message.params.error;
+      // A notice Codex retries past is not why the turn failed.
+      if (!message.params.willRetry) {
+        state.error = message.params.error;
+      }
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
       break;
     case "turn/completed":
@@ -1160,7 +1163,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
-      error: turnState.error ?? missingFinalAnswerError,
+      // The root turn's own error is why it failed; an earlier `error` notice may be one Codex retried past.
+      error: turnState.finalTurn?.error ?? turnState.error ?? missingFinalAnswerError,
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),

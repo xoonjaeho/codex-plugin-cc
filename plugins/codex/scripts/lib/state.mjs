@@ -78,10 +78,18 @@ export function loadState(cwd) {
   }
 }
 
+function isActiveJob(job) {
+  return job.status === "queued" || job.status === "running";
+}
+
+// Active jobs are never pruned: their records hold the launcher pid and the thread
+// reservation that keeps two resumes off one Codex thread.
 function pruneJobs(jobs) {
-  return [...jobs]
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
+  const sorted = [...jobs].sort((left, right) =>
+    String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))
+  );
+  let finishedSlots = MAX_JOBS - sorted.filter(isActiveJob).length;
+  return sorted.filter((job) => isActiveJob(job) || finishedSlots-- > 0);
 }
 
 function removeFileIfExists(filePath) {
@@ -287,6 +295,12 @@ function isProcessAlive(pid) {
 // finishes (cancelled background job, ended session, crash, sleep), the job is
 // frozen at "running"/"queued" with a stale pid forever. Reconcile such orphans
 // to "failed" at read time so /status, /result and /cancel reflect reality.
+//
+// The hand-off to a worker takes well under a second. Windows reuses pids, so an unrelated
+// process can inherit a dead launcher's pid and look alive; past this age a queued job
+// that still has no worker pid is stuck either way.
+export const QUEUED_HANDOFF_TIMEOUT_MS = 60_000;
+
 function reconcileJobLiveness(jobs) {
   const changedIds = [];
   const now = nowIso();
@@ -294,7 +308,13 @@ function reconcileJobLiveness(jobs) {
     if (job.status !== "running" && job.status !== "queued") {
       return job;
     }
-    if (job.pid == null || isProcessAlive(job.pid)) {
+    // A queued job has no worker pid until its launcher hands it over; until then the
+    // launcher's own pid is the only liveness signal.
+    const unclaimed = job.pid == null && job.status === "queued";
+    const neverStarted = unclaimed && Number.isInteger(job.launcherPid);
+    const handoffExpired = unclaimed && Date.now() - Date.parse(job.queuedAt ?? job.createdAt) > QUEUED_HANDOFF_TIMEOUT_MS;
+    const alive = neverStarted ? isProcessAlive(job.launcherPid) : job.pid == null || isProcessAlive(job.pid);
+    if (alive && !handoffExpired) {
       return job;
     }
     changedIds.push(job.id);
@@ -307,7 +327,11 @@ function reconcileJobLiveness(jobs) {
       updatedAt: now,
       errorMessage:
         job.errorMessage ??
-        `Codex job orphaned: launcher process (pid ${job.pid}) is no longer running.`
+        (neverStarted && !alive
+          ? `Codex job never started: launcher process (pid ${job.launcherPid}) exited before handing it to a background worker.`
+          : handoffExpired
+          ? `Codex job never started: no background worker took it over within ${QUEUED_HANDOFF_TIMEOUT_MS / 1000} s of queuing.`
+          : `Codex job orphaned: launcher process (pid ${job.pid}) is no longer running.`)
     };
   });
   return { jobs: reconciled, changedIds };

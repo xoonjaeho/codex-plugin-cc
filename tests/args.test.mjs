@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { parseArgs, splitRawArgumentString } from "../plugins/codex/scripts/lib/args.mjs";
+import { normalizeArgv, parseArgs, splitRawArgumentString } from "../plugins/codex/scripts/lib/args.mjs";
 import { makeTempDir, run, initGitRepo } from "./helpers.mjs";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import fs from "node:fs";
@@ -51,6 +51,25 @@ test("backslash escapes a following quote or backslash in a raw positional", () 
   assert.deepEqual(positionals, ['focus on "quoted" and a\\b']);
 });
 
+const REVIEW_PARSE_CONFIG = { valueOptions: ["base", "scope"], booleanOptions: ["background", "wait"], rejectUnknownOptions: true };
+
+test("normalizeArgv splits the raw argument string that follows a separate --background", () => {
+  const { options, positionals } = parseArgs(normalizeArgv(["--background", "--base main focus words"], { splitAfterBackground: true }), REVIEW_PARSE_CONFIG);
+  assert.equal(options.background, true);
+  assert.equal(options.base, "main");
+  assert.equal(positionals.join(" "), "focus words");
+
+  const empty = parseArgs(normalizeArgv(["--background", ""], { splitAfterBackground: true }), REVIEW_PARSE_CONFIG);
+  assert.equal(empty.options.background, true);
+  assert.deepEqual(empty.positionals, []);
+});
+
+test("normalizeArgv leaves an explicit multi-argv call unsplit", () => {
+  assert.deepEqual(normalizeArgv(["--background", "--base", "main"], { splitAfterBackground: true }), ["--background", "--base", "main"]);
+  const { positionals } = parseArgs(normalizeArgv(["--background", "--base", "main", "focus words"]), REVIEW_PARSE_CONFIG);
+  assert.deepEqual(positionals, ["focus words"]);
+});
+
 test("task --help prints usage and does not dispatch a Codex thread", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -95,4 +114,8 @@ test("task unknown --flag errors without dispatching a Codex thread", () => {
     const state = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
     assert.equal((state.threads ?? []).length, 0);
   }
+});
+
+test("normalizeArgv keeps a task prompt after --background as one argument unless the caller opts in", () => {
+  assert.deepEqual(normalizeArgv(["--background", "fix the \"quoted\" bug"]), ["--background", "fix the \"quoted\" bug"]);
 });

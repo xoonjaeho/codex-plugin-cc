@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { normalizeArgv, parseArgs } from "./lib/args.mjs";
 import {
     buildPersistentTaskThreadName,
     DEFAULT_CONTINUE_PROMPT,
@@ -32,11 +32,13 @@ import {
   listJobs,
   setConfig,
   upsertJob,
+  withStateLock,
   writeJobFile
 } from "./lib/state.mjs";
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  claimQueuedJob,
   persistQueuedJobAndSpawn,
   readStoredJob,
   resolveCancelableJob,
@@ -64,7 +66,8 @@ import {
   renderSetupReport,
   renderStatusReport,
   renderTaskResult,
-  noFileEditsWarning
+  noFileEditsWarning,
+  capacityResumeHint
 } from "./lib/render.mjs";
 import { readLastAssistantMessage } from "./lib/rollout.mjs";
 
@@ -131,19 +134,8 @@ function normalizeReasoningEffort(effort) {
   return normalized;
 }
 
-function normalizeArgv(argv) {
-  if (argv.length === 1) {
-    const [raw] = argv;
-    if (!raw || !raw.trim()) {
-      return [];
-    }
-    return splitRawArgumentString(raw);
-  }
-  return argv;
-}
-
-function parseCommandInput(argv, config = {}) {
-  return parseArgs(normalizeArgv(argv), {
+function parseCommandInput(argv, { splitAfterBackground = false, ...config } = {}) {
+  return parseArgs(normalizeArgv(argv, { splitAfterBackground }), {
     rejectUnknownOptions: true,
     ...config,
     booleanOptions: ["help", ...(config.booleanOptions ?? [])],
@@ -351,10 +343,10 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   };
 }
 
-async function resolveLatestTrackedTaskThread(cwd, options = {}) {
+async function resolveLatestTrackedTaskThread(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const sessionId = getCurrentClaudeSessionId();
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
   if (activeTask) {
@@ -476,43 +468,75 @@ async function executeReviewRun(request) {
 }
 
 
+// Runs before the resuming job is registered: registering first could prune an old target.
+async function resolveTaskResumeThread(workspaceRoot, { resumeLast, resumeJobId }) {
+  if (resumeLast) {
+    const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot);
+    if (!latestThread) {
+      throw new Error("No previous Codex task thread was found for this repository.");
+    }
+    return latestThread.id;
+  }
+
+  if (!resumeJobId) {
+    return null;
+  }
+  // Not session-filtered: a full job id is an explicit handoff that must survive /clear or a
+  // restart. listJobs reads this workspace's state only, and the exact-id match rejects prefixes.
+  const job = listJobs(workspaceRoot).find((candidate) => candidate.id === resumeJobId);
+  if (!job) {
+    throw new Error(`No task job ${resumeJobId} found for this repository. --resume-job needs the full job id.`);
+  }
+  if (job.jobClass !== "task") {
+    throw new Error(`Job ${resumeJobId} is a ${job.jobClass} job, not a task job.`);
+  }
+  if (isActiveJobStatus(job.status)) {
+    throw new Error(`Task ${resumeJobId} is still running. Use /codex:status before continuing it.`);
+  }
+  if (!job.threadId) {
+    throw new Error(`Task ${resumeJobId} has no Codex thread to resume.`);
+  }
+  return job.threadId;
+}
+
+// The conflict check and the job's registration share one state-lock section, so two resumes
+// of one thread cannot both pass it. A queued resume has no threadId until Codex resumes the
+// thread; its resumeThreadId stands in until then.
+function claimTaskThread(workspaceRoot, { jobId, threadId, resumeJobId }, register) {
+  return withStateLock(workspaceRoot, () => {
+    if (threadId) {
+      const holder = listJobs(workspaceRoot).find(
+        (candidate) =>
+          candidate.id !== jobId &&
+          isActiveJobStatus(candidate.status) &&
+          (candidate.threadId ?? candidate.resumeThreadId) === threadId
+      );
+      if (holder) {
+        throw new Error(
+          `Job ${holder.id} is still ${holder.status} on Codex thread ${threadId}. Wait for it to finish before resuming ${resumeJobId ?? "it"}.`
+        );
+      }
+    }
+    return register();
+  });
+}
+
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
   ensureCodexAvailable(request.cwd);
 
-  const resumeJob = Boolean(request.resumeJobId);
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
-    resumeLast: Boolean(request.resumeLast) || resumeJob
+    resumeLast: Boolean(request.resumeLast) || Boolean(request.resumeJobId)
   });
 
-  let resumeThreadId = null;
-  if (request.resumeLast) {
-    const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
-      excludeJobId: request.jobId
-    });
-    if (!latestThread) {
-      throw new Error("No previous Codex task thread was found for this repository.");
-    }
-    resumeThreadId = latestThread.id;
-  }
-
-  if (resumeJob) {
-    const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
-    const job = jobs.find((candidate) => candidate.id === request.resumeJobId);
-    if (!job) {
-      throw new Error(`No task job ${request.resumeJobId} found for this repository.`);
-    }
-    if (job.jobClass !== "task") {
-      throw new Error(`Job ${request.resumeJobId} is a ${job.jobClass} job, not a task job.`);
-    }
-    if (isActiveJobStatus(job.status)) {
-      throw new Error(`Task ${request.resumeJobId} is still running. Use /codex:status before continuing it.`);
-    }
-    if (!job.threadId) {
-      throw new Error(`Task ${request.resumeJobId} has no Codex thread to resume.`);
-    }
-    resumeThreadId = job.threadId;
+  // Resolved and claimed by handleTask before this job was registered.
+  const resumeThreadId = request.resumeThreadId ?? null;
+  // Queued by an older plugin version that resolved the thread in the worker; never start a new thread for it.
+  if (!resumeThreadId && (request.resumeLast || request.resumeJobId)) {
+    throw new Error(
+      "This resume was queued by an older Codex plugin version and its thread was never resolved. Re-run the resume command."
+    );
   }
 
   if (!request.prompt && !resumeThreadId) {
@@ -537,6 +561,7 @@ async function executeTaskRun(request) {
     {
       rawOutput,
       failureMessage,
+      failed: result.status !== 0,
       reasoningSummary: result.reasoningSummary
     },
     {
@@ -549,13 +574,18 @@ async function executeTaskRun(request) {
   const rendered = warning ? `${baseRendered}
 ${warning}
 ` : baseRendered;
+  const resumeHint =
+    result.status !== 0
+      ? capacityResumeHint(failureMessage, { jobId: request.jobId ?? null, write: Boolean(request.write) })
+      : null;
   const payload = {
     status: result.status,
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
     reasoningSummary: result.reasoningSummary,
-    ...(warning ? { warning } : {})
+    ...(warning ? { warning } : {}),
+    ...(resumeHint ? { resumeHint } : {})
   };
 
   return {
@@ -597,6 +627,10 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 
 function renderQueuedTaskLaunch(payload) {
   return `${payload.title} started in the background as ${payload.jobId}. Check /codex:status ${payload.jobId} for progress.\n`;
+}
+
+function renderQueuedReviewLaunch(payload) {
+  return `${renderQueuedTaskLaunch(payload).trimEnd()} Fetch the review with /codex:result ${payload.jobId}.\n`;
 }
 
 function getJobKindLabel(kind, jobClass) {
@@ -643,7 +677,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, resumeJobId, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, resumeJobId, resumeThreadId, jobId }) {
   return {
     cwd,
     model,
@@ -652,6 +686,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, resum
     write,
     resumeLast,
     resumeJobId: resumeJobId ?? null,
+    resumeThreadId: resumeThreadId ?? null,
     jobId
   };
 }
@@ -724,6 +759,9 @@ function spawnDetachedTaskWorker(cwd, jobId, logFile) {
   if (typeof stderrFd === "number") {
     fs.closeSync(stderrFd);
   }
+  // A failed spawn has no pid and persistQueuedJobAndSpawn fails the job from that;
+  // an unhandled 'error' event would instead crash the launcher with a stack trace.
+  child.once("error", () => {});
   child.unref();
   return child;
 }
@@ -755,6 +793,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
+    splitAfterBackground: true,
     valueOptions: ["base", "scope", "model", "cwd"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
@@ -783,16 +822,25 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
+  const request = {
+    cwd,
+    base: options.base,
+    scope: options.scope,
+    model: options.model,
+    focusText,
+    reviewName: config.reviewName
+  };
+  if (options.background) {
+    ensureCodexAvailable(cwd);
+    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    outputCommandResult(payload, renderQueuedReviewLaunch(payload), options.json);
+    return;
+  }
   await runForegroundCommand(
     job,
     (progress) =>
       executeReviewRun({
-        cwd,
-        base: options.base,
-        scope: options.scope,
-        model: options.model,
-        focusText,
-        reviewName: config.reviewName,
+        ...request,
         onProgress: progress
       }),
     { json: options.json }
@@ -845,8 +893,16 @@ async function handleTask(argv) {
   if (options.background) {
     ensureCodexAvailable(cwd);
     requireTaskRequest(prompt, resumeLast, resumeJobId);
+  }
 
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  const resumeThreadId = await resolveTaskResumeThread(workspaceRoot, { resumeLast, resumeJobId });
+  const job = {
+    ...buildTaskJob(workspaceRoot, taskMetadata, write),
+    ...(resumeThreadId ? { resumeThreadId } : {})
+  };
+  const claim = { jobId: job.id, threadId: resumeThreadId, resumeJobId };
+
+  if (options.background) {
     const request = buildTaskRequest({
       cwd,
       model,
@@ -855,14 +911,19 @@ async function handleTask(argv) {
       write,
       resumeLast,
       resumeJobId,
+      resumeThreadId,
       jobId: job.id
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = claimTaskThread(workspaceRoot, claim, () => enqueueBackgroundTask(cwd, job, request));
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  if (resumeThreadId) {
+    claimTaskThread(workspaceRoot, claim, () =>
+      upsertJob(workspaceRoot, { ...job, status: "queued", phase: "queued", pid: process.pid })
+    );
+  }
   await runForegroundCommand(
     job,
     (progress) =>
@@ -874,6 +935,7 @@ async function handleTask(argv) {
         write,
         resumeLast,
         resumeJobId,
+        resumeThreadId,
         jobId: job.id,
         onProgress: progress
       }),
@@ -960,6 +1022,13 @@ async function handleTaskWorker(argv) {
     throw error;
   }
 
+  const claim = claimQueuedJob(workspaceRoot, jobId);
+  if (!claim.claimed) {
+    appendLogLine(storedJob.logFile ?? null, `Worker pid ${process.pid} did not start the job: it is already ${claim.status}.`);
+    return;
+  }
+  const execute = storedJob.jobClass === "review" ? executeReviewRun : executeTaskRun;
+
   const { logFile, progress } = createTrackedProgress(
     {
       ...storedJob,
@@ -976,7 +1045,7 @@ async function handleTaskWorker(argv) {
       logFile
     },
     () =>
-      executeTaskRun({
+      execute({
         ...request,
         onProgress: progress
       }),

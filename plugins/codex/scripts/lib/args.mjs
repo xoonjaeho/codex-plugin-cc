@@ -134,3 +134,19 @@ export function splitRawArgumentString(raw) {
 
   return tokens;
 }
+
+// Slash commands pass "$ARGUMENTS" as one shell word; the background flows prepend
+// --background as its own word, so that raw string still needs splitting.
+// splitAfterBackground: only the review commands, whose docs pass `--background "$ARGUMENTS"`;
+// a direct `task --background "<prompt>"` must keep its prompt as one argument.
+export function normalizeArgv(argv, { splitAfterBackground = false } = {}) {
+  if (argv.length === 1 || (splitAfterBackground && argv.length === 2 && argv[0] === "--background")) {
+    const raw = argv[argv.length - 1];
+    const flags = argv.slice(0, -1);
+    if (!raw || !raw.trim()) {
+      return flags;
+    }
+    return [...flags, ...splitRawArgumentString(raw)];
+  }
+  return argv;
+}

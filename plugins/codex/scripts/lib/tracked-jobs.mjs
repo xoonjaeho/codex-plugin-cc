@@ -151,7 +151,73 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+const LAUNCHER_SIGNALS = ["SIGTERM", "SIGINT"];
+
+// One listener set per process, writing to the log of the job it is running now.
+let launcherLogFile = null;
+let launcherExitLoggingInstalled = false;
+
+function describeThrown(value) {
+  try {
+    return value instanceof Error ? String(value.message) : String(value);
+  } catch {
+    return "(value cannot be converted to a string)";
+  }
+}
+
+// Never throws: these run inside exit, signal and uncaught-exception paths, where a throw
+// would change how the launcher exits.
+function logLauncherEvent(event, detail) {
+  try {
+    if (!launcherLogFile) {
+      return;
+    }
+    const text = describeThrown(detail).replace(/\s*[\r\n]+\s*/g, " ").trim();
+    // No O_CREAT: a deleted log means the job was pruned or cleaned up, so ENOENT skips it.
+    const fd = fs.openSync(launcherLogFile, fs.constants.O_APPEND | fs.constants.O_WRONLY);
+    try {
+      fs.writeSync(fd, `[${nowIso()}] Launcher pid ${process.pid} ${event}: ${text}.\n`, null, "utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // Logging must never change how the launcher exits.
+  }
+}
+
+// Logs why the launcher (the pid stored on the job) went away, so an orphaned job's log
+// names the cause. Observe only: a signal is re-raised once our listener is gone so the
+// default termination still happens, and the exception monitor does not handle the error.
+// Limitation: no signal listeners on Windows, so Ctrl+C there goes unlogged. Re-raising via
+// process.kill would end it with exit code 1 instead of the default status, and a SIGTERM
+// from another process is a hard kill that never reaches JS anyway.
+function installLauncherExitLogging(logFile) {
+  launcherLogFile = logFile;
+  if (!logFile || launcherExitLoggingInstalled) {
+    return;
+  }
+  launcherExitLoggingInstalled = true;
+  if (process.platform !== "win32") {
+    const onSignal = (signal) => {
+      logLauncherEvent(signal, "signal received");
+      for (const name of LAUNCHER_SIGNALS) {
+        process.removeListener(name, onSignal);
+      }
+      if (process.listenerCount(signal) === 0) {
+        process.kill(process.pid, signal);
+      }
+    };
+    for (const name of LAUNCHER_SIGNALS) {
+      process.on(name, onSignal);
+    }
+  }
+  process.once("beforeExit", (code) => logLauncherEvent("beforeExit", `code ${code}`));
+  process.once("exit", (code) => logLauncherEvent("exit", `code ${code}`));
+  process.on("uncaughtExceptionMonitor", (error, origin) => logLauncherEvent(origin, error));
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
+  installLauncherExitLogging(options.logFile ?? job.logFile ?? null);
   const runningRecord = {
     ...job,
     status: "running",

@@ -4,7 +4,7 @@ argument-hint: "[--background|--wait] [--resume|--fresh] [--model <model|spark>]
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
-Use `/codex:rescue` and `codex:codex-rescue` only for one bounded non-write, non-review task. Long, write, and review runs must use the main-session Bash companion directly, in the foreground or with `run_in_background: true`. Pick the subcommand for the case — always `${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs`, never a relative `scripts/...` path (the target repo does not contain that script):
+Use `/codex:rescue` and `codex:codex-rescue` only for one bounded non-write, non-review task. Long, write, and review runs must use the main-session Bash companion directly: in the foreground for short runs, and with the companion's own `--background` flag for long ones — never under Bash `run_in_background: true`, whose stop kills the run. Pick the subcommand for the case — always `${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs`, never a relative `scripts/...` path (the target repo does not contain that script):
 
 ```bash
 # write or multi-minute implementation

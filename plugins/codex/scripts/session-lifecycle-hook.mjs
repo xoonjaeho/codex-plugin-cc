@@ -72,8 +72,13 @@ function cleanupSessionJobs(cwd, sessionId) {
 
   // Re-read under the state lock: jobs added by other processes since the read above must survive.
   updateState(workspaceRoot, (latest) => {
-    latest.jobs = latest.jobs.filter((job) => job.sessionId !== sessionId);
+    latest.jobs = latest.jobs.filter((job) => job.sessionId !== sessionId || isResumableTaskJob(job));
   });
+}
+
+// SessionEnd also fires on /clear; a finished task with a thread stays so `task --resume-job <id>` still works.
+function isResumableTaskJob(job) {
+  return job.jobClass === "task" && Boolean(job.threadId) && job.status !== "queued" && job.status !== "running";
 }
 
 function handleSessionStart(input) {

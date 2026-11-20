@@ -1,8 +1,17 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import {
+  getConfig,
+  listJobs,
+  loadState,
+  readJobFile,
+  resolveJobFile,
+  upsertJob,
+  withStateLock,
+  writeJobFile
+} from "./state.mjs";
+import { appendLogLine, nowIso, SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -188,21 +197,62 @@ export function readStoredJob(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+// launcherPid lets liveness fail a job whose launcher died before any worker took it over;
+// queuedAt starts the hand-off clock here, since createdAt predates the pre-enqueue checks.
 export function persistQueuedJobAndSpawn(workspaceRoot, queuedRecord, spawnWorker) {
-  const recordWithoutPid = { ...queuedRecord, pid: null };
+  const recordWithoutPid = { ...queuedRecord, pid: null, launcherPid: process.pid, queuedAt: nowIso() };
   writeJobFile(workspaceRoot, queuedRecord.id, recordWithoutPid);
   upsertJob(workspaceRoot, recordWithoutPid);
 
-  const child = spawnWorker();
-
-  const current = readStoredJob(workspaceRoot, queuedRecord.id);
-  if (current?.status === "queued") {
-    // ponytail: a read-then-write window remains until state updates take a cross-process lock.
-    const recordWithPid = { ...current, pid: child?.pid ?? null };
-    writeJobFile(workspaceRoot, queuedRecord.id, recordWithPid);
-    upsertJob(workspaceRoot, recordWithPid);
+  let child;
+  try {
+    child = spawnWorker();
+    if (!Number.isInteger(child?.pid)) {
+      throw new Error("the worker process did not start");
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const errorMessage = `Could not start the background worker for ${queuedRecord.id}: ${reason}`;
+    const failure = { status: "failed", phase: "failed", pid: null, errorMessage, completedAt: nowIso() };
+    writeJobFile(workspaceRoot, queuedRecord.id, { ...recordWithoutPid, ...failure });
+    upsertJob(workspaceRoot, { id: queuedRecord.id, ...failure });
+    appendLogLine(queuedRecord.logFile ?? null, errorMessage);
+    throw new Error(errorMessage);
   }
+
+  // Under the lock, so the hand-off cannot overwrite a worker that already claimed or ran the job.
+  withStateLock(workspaceRoot, () => {
+    const current = loadState(workspaceRoot).jobs.find((job) => job.id === queuedRecord.id);
+    if (current?.status !== "queued" || current.pid != null) {
+      return;
+    }
+    upsertJob(workspaceRoot, { id: queuedRecord.id, pid: child.pid });
+    const stored = readStoredJob(workspaceRoot, queuedRecord.id);
+    if (stored?.status === "queued") {
+      writeJobFile(workspaceRoot, queuedRecord.id, { ...stored, pid: child.pid });
+    }
+  });
   return child;
+}
+
+// The worker takes its job over under the state lock. A job no longer queued was failed by
+// liveness (its launcher died before the hand-off) or cancelled: running it now would be an
+// unreported second run. A pid other than ours means another worker already holds the job
+// (the launcher records the worker's own pid, so the legitimate worker still passes).
+export function claimQueuedJob(workspaceRoot, jobId) {
+  return withStateLock(workspaceRoot, () => {
+    const current = loadState(workspaceRoot).jobs.find((job) => job.id === jobId);
+    if (current && current.status !== "queued") {
+      return { claimed: false, status: current.status };
+    }
+    if (current && current.pid != null && current.pid !== process.pid) {
+      return { claimed: false, status: `claimed by worker pid ${current.pid}` };
+    }
+    if (current) {
+      upsertJob(workspaceRoot, { id: jobId, pid: process.pid });
+    }
+    return { claimed: true, status: "queued" };
+  });
 }
 
 function matchJobReference(jobs, reference, predicate = () => true) {

@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir } from "./helpers.mjs";
-import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, upsertJob, withStateLock, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { QUEUED_HANDOFF_TIMEOUT_MS, listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState, upsertJob, withStateLock, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -186,6 +186,34 @@ test("listJobs does not reconcile jobs without a pid or already-finished jobs", 
   const jobs = listJobs(workspace);
   assert.equal(jobs.find((job) => job.id === "no-pid").status, "queued");
   assert.equal(jobs.find((job) => job.id === "done").status, "completed");
+});
+
+test("listJobs fails a queued job no worker took over in time even if its launcher pid looks alive", () => {
+  // Windows reuses pids: the live test process stands in for an unrelated process that
+  // inherited the dead launcher's pid.
+  const workspace = makeTempDir();
+  const ago = (seconds) => new Date(Date.now() - seconds * 1000).toISOString();
+  upsertJob(workspace, { id: "stuck", status: "queued", pid: null, launcherPid: process.pid, createdAt: ago(61), workspaceRoot: workspace });
+  upsertJob(workspace, { id: "fresh", status: "queued", pid: null, launcherPid: process.pid, createdAt: ago(50), workspaceRoot: workspace });
+
+  const jobs = listJobs(workspace);
+  const stuck = jobs.find((job) => job.id === "stuck");
+  assert.equal(QUEUED_HANDOFF_TIMEOUT_MS, 60_000);
+  assert.equal(stuck.status, "failed");
+  assert.equal(stuck.errorMessage, "Codex job never started: no background worker took it over within 60 s of queuing.");
+  assert.equal(jobs.find((job) => job.id === "fresh").status, "queued");
+});
+
+test("listJobs measures the queued hand-off from queuedAt, not createdAt", () => {
+  // createdAt is stamped before the pre-enqueue checks, so it can be far older than the queue entry.
+  const workspace = makeTempDir();
+  const ago = (seconds) => new Date(Date.now() - seconds * 1000).toISOString();
+  upsertJob(workspace, { id: "slow-start", status: "queued", pid: null, launcherPid: process.pid, createdAt: ago(600), queuedAt: ago(1), workspaceRoot: workspace });
+  upsertJob(workspace, { id: "stuck", status: "queued", pid: null, launcherPid: process.pid, createdAt: ago(1), queuedAt: ago(61), workspaceRoot: workspace });
+
+  const jobs = listJobs(workspace);
+  assert.equal(jobs.find((job) => job.id === "slow-start").status, "queued");
+  assert.equal(jobs.find((job) => job.id === "stuck").status, "failed");
 });
 
 function listTmpFiles(dir) {
@@ -389,4 +417,25 @@ test("concurrent upsertJob calls from separate processes keep every job and its 
       process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
     }
   }
+});
+
+test("saveState never prunes an active job, however old", () => {
+  const workspace = makeTempDir();
+  const finished = Array.from({ length: 50 }, (_, index) => {
+    const updatedAt = new Date(Date.UTC(2026, 0, 2, 0, index, 0)).toISOString();
+    return { id: `job-${index}`, status: "completed", updatedAt, createdAt: updatedAt };
+  });
+  const oldTimestamp = new Date(Date.UTC(2026, 0, 1)).toISOString();
+  const active = [
+    { id: "job-running", status: "running", updatedAt: oldTimestamp, createdAt: oldTimestamp },
+    { id: "job-queued", status: "queued", updatedAt: oldTimestamp, createdAt: oldTimestamp }
+  ];
+
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [...finished, ...active] });
+
+  const savedIds = JSON.parse(fs.readFileSync(resolveStateFile(workspace), "utf8")).jobs.map((job) => job.id);
+  assert.equal(savedIds.length, 50);
+  assert.ok(savedIds.includes("job-running"));
+  assert.ok(savedIds.includes("job-queued"));
+  assert.ok(!savedIds.includes("job-0") && !savedIds.includes("job-1"), "the oldest finished jobs make room");
 });

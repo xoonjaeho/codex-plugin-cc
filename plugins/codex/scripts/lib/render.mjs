@@ -75,9 +75,11 @@ function isStructuredReviewStoredResult(storedJob) {
   if (!result || typeof result !== "object" || Array.isArray(result)) {
     return false;
   }
+  // `review` marks a native review too, whose codex.stdout lacks the rendered header.
   return (
     Object.prototype.hasOwnProperty.call(result, "result") ||
-    Object.prototype.hasOwnProperty.call(result, "parseError")
+    Object.prototype.hasOwnProperty.call(result, "parseError") ||
+    Object.prototype.hasOwnProperty.call(result, "review")
   );
 }
 
@@ -312,14 +314,26 @@ export function renderNativeReviewResult(result, meta) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+// Only for a failed turn: Codex can report a capacity error it then retries past, and that
+// turn completes normally.
+export function capacityResumeHint(failureMessage, meta = {}) {
+  // Codex's model-capacity wording; a bare "at capacity" also matches disk or quota errors.
+  if (!meta.jobId || !/\bSelected model is at capacity\b/i.test(String(failureMessage ?? ""))) {
+    return null;
+  }
+  return `Codex model was at capacity. Resume this task with: task --resume-job ${meta.jobId}${meta.write ? " --write" : ""}`;
+}
+
 export function renderTaskResult(parsedResult, meta) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
-  if (rawOutput) {
-    return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-  }
-
-  const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${message}\n`;
+  const failureMessage = String(parsedResult?.failureMessage ?? "").trim();
+  const body = rawOutput
+    ? rawOutput.endsWith("\n")
+      ? rawOutput
+      : `${rawOutput}\n`
+    : `${failureMessage || "Codex did not return a final message."}\n`;
+  const hint = parsedResult?.failed ? capacityResumeHint(failureMessage, meta) : null;
+  return hint ? `${body}${hint}\n` : body;
 }
 
 export function renderStatusReport(report) {
@@ -445,6 +459,8 @@ export function renderStoredJobResult(job, storedJob, recovered = null) {
     (hasText(storedJob?.result?.rawOutput) && storedJob.result.rawOutput) ||
     (hasText(storedJob?.result?.codex?.stdout) && storedJob.result.codex.stdout) ||
     "";
+  // The capacity hint is the caller's next step, so it stays the last line, below the footer.
+  const resumeHint = hasText(storedJob?.result?.resumeHint) ? `${storedJob.result.resumeHint.trim()}\n` : "";
   if (rawOutput) {
     // rawOutput wins over `rendered` below, so a warning that lives only in the
     // rendered text is invisible through `result <job-id>`. Carry it separately.
@@ -452,17 +468,20 @@ export function renderStoredJobResult(job, storedJob, recovered = null) {
     const body = `${warning}${rawOutput}`;
     const output = body.endsWith("\n") ? body : `${body}\n`;
     if (!threadId) {
-      return output;
+      return `${output}${resumeHint}`;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n${resumeHint}`;
   }
 
   if (hasText(storedJob?.rendered)) {
-    const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
+    let output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
+    if (resumeHint && output.endsWith(resumeHint)) {
+      output = output.slice(0, -resumeHint.length);
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    if (!threadId) {
+      return `${output}${resumeHint}`;
+    }
+    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n${resumeHint}`;
   }
 
   const lines = [

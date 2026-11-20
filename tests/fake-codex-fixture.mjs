@@ -347,7 +347,13 @@ rl.on("line", (line) => {
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        const resumeResponse = { id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } };
+        if (BEHAVIOR === "slow-resume") {
+          // Holds the resuming job in the window before its threadId is recorded.
+          setTimeout(() => send(resumeResponse), 3000);
+        } else {
+          send(resumeResponse);
+        }
         break;
       }
 
@@ -602,6 +608,27 @@ rl.on("line", (line) => {
 	          interruptibleTurns.set(turnId, { threadId: thread.id, timer });
 	        } else if (BEHAVIOR === "slow-task") {
 	          emitTurnCompletedLater(thread.id, turnId, items, 400);
+	        } else if (BEHAVIOR === "capacity-error") {
+	          const capacityError = { message: "Selected model is at capacity. Please try a different model." };
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: "Looking at the repository first.", phase: "commentary" } } });
+	          send({ method: "error", params: { threadId: thread.id, turnId, error: capacityError, willRetry: false } });
+	          send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed", capacityError) } });
+	        } else if (BEHAVIOR === "capacity-final-only") {
+	          const capacityError = { message: "Selected model is at capacity. Please try a different model." };
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: "Looking at the repository first.", phase: "commentary" } } });
+	          send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed", capacityError) } });
+	        } else if (BEHAVIOR === "capacity-then-other-error") {
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({ method: "error", params: { threadId: thread.id, turnId, error: { message: "Selected model is at capacity. Please try a different model." }, willRetry: true } });
+	          send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: "Looking at the repository first.", phase: "commentary" } } });
+	          send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed", { message: "stream disconnected before completion" }) } });
+	        } else if (BEHAVIOR === "capacity-retry-then-null-error") {
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({ method: "error", params: { threadId: thread.id, turnId, error: { message: "Selected model is at capacity. Please try a different model." }, willRetry: true } });
+	          send({ method: "item/completed", params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: "Looking at the repository first.", phase: "commentary" } } });
+	          send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed") } });
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
 	        }

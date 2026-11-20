@@ -94,6 +94,9 @@ test("rescue routing stays bounded and redirects long, write, and review work", 
 
   assert.match(command, /only for one bounded non-write, non-review task/i);
   assert.match(command, /Long, write, and review runs must use the main-session Bash companion directly/i);
+  assert.match(command, /companion's own `--background` flag for long ones/i);
+  assert.match(command, /never under Bash `run_in_background: true`/);
+  assert.doesNotMatch(command, /in the foreground or with `run_in_background: true`/i);
   assert.match(
     command,
     /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/codex-companion\.mjs" task --write --cwd <repo> --prompt-file <path>/

@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderReviewResult, renderStoredJobResult, noFileEditsWarning } from "../plugins/codex/scripts/lib/render.mjs";
+import {
+  renderReviewResult,
+  renderStoredJobResult,
+  renderTaskResult,
+  noFileEditsWarning,
+  capacityResumeHint
+} from "../plugins/codex/scripts/lib/render.mjs";
 
 test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
   const output = renderReviewResult(
@@ -117,4 +123,74 @@ test("renderStoredJobResult prefers rollout recovery over partialOutput", () => 
 
   assert.match(output, /recovered rollout text/);
   assert.doesNotMatch(output, /half done/);
+});
+
+const CAPACITY_ERROR = "Selected model is at capacity. Please try a different model.";
+
+test("renderTaskResult ends a capacity failure with a --resume-job hint even when the turn produced output", () => {
+  const output = renderTaskResult(
+    { rawOutput: "Looking at the repository layout first.", failureMessage: CAPACITY_ERROR, failed: true },
+    { jobId: "task-abc123", write: false }
+  );
+  assert.equal(
+    output,
+    "Looking at the repository layout first.\nCodex model was at capacity. Resume this task with: task --resume-job task-abc123\n"
+  );
+
+  const writeOutput = renderTaskResult(
+    { rawOutput: "", failureMessage: CAPACITY_ERROR, failed: true },
+    { jobId: "task-abc123", write: true }
+  );
+  assert.equal(
+    writeOutput,
+    `${CAPACITY_ERROR}\nCodex model was at capacity. Resume this task with: task --resume-job task-abc123 --write\n`
+  );
+});
+
+test("renderTaskResult adds no resume hint for other errors or successful turns", () => {
+  const otherError = renderTaskResult(
+    { rawOutput: "Partial progress.", failureMessage: "stream disconnected before completion", failed: true },
+    { jobId: "task-abc123" }
+  );
+  assert.equal(otherError, "Partial progress.\n");
+
+  // A capacity error Codex retried past still completes the turn: no hint.
+  const success = renderTaskResult(
+    { rawOutput: "All done.", failureMessage: CAPACITY_ERROR, failed: false },
+    { jobId: "task-abc123" }
+  );
+  assert.equal(success, "All done.\n");
+});
+
+test("renderStoredJobResult keeps the capacity resume hint below raw output", () => {
+  const hint = "Codex model was at capacity. Resume this task with: task --resume-job task-abc123";
+  const output = renderStoredJobResult(
+    { id: "task-abc123", status: "failed" },
+    { result: { rawOutput: "Partial progress.", resumeHint: hint } }
+  );
+  assert.equal(output, `Partial progress.\n${hint}\n`);
+});
+
+test("capacityResumeHint ignores capacity wording that is not the model-capacity error", () => {
+  assert.equal(capacityResumeHint("write failed: disk at capacity", { jobId: "task-abc123" }), null);
+  assert.equal(capacityResumeHint("Rate limit: the queue is at capacity", { jobId: "task-abc123" }), null);
+  assert.match(capacityResumeHint(CAPACITY_ERROR, { jobId: "task-abc123" }), /task --resume-job task-abc123$/);
+});
+
+test("renderStoredJobResult puts the capacity resume hint after the Codex session footer", () => {
+  const hint = "Codex model was at capacity. Resume this task with: task --resume-job task-abc123";
+  const footer = "Codex session ID: thr_1\nResume in Codex: codex resume thr_1\n";
+
+  const fromRawOutput = renderStoredJobResult(
+    { id: "task-abc123", status: "failed" },
+    { threadId: "thr_1", result: { rawOutput: "Partial progress.", resumeHint: hint } }
+  );
+  assert.equal(fromRawOutput, `Partial progress.\n\n${footer}${hint}\n`);
+
+  // No rawOutput: the stored `rendered` text already ends with the hint from renderTaskResult.
+  const fromRendered = renderStoredJobResult(
+    { id: "task-abc123", status: "failed" },
+    { threadId: "thr_1", rendered: `${CAPACITY_ERROR}\n${hint}\n`, result: { rawOutput: "", resumeHint: hint } }
+  );
+  assert.equal(fromRendered, `${CAPACITY_ERROR}\n\n${footer}${hint}\n`);
 });

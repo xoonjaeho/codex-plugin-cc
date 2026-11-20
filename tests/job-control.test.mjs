@@ -45,6 +45,7 @@ test("persistQueuedJobAndSpawn stores the queued job before spawning the worker"
 
     assert.equal(seen?.status, "queued");
     assert.deepEqual(seen?.request, { prompt: "do work" });
+    assert.ok(Math.abs(Date.now() - Date.parse(seen?.queuedAt)) < 10_000, `queuedAt should be stamped at enqueue, got ${seen?.queuedAt}`);
   });
 });
 
