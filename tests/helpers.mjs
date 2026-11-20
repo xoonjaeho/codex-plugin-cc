@@ -20,6 +20,13 @@ delete process.env.CODEX_COMPANION_SESSION_ID;
 // nothing else ever will. Reap them, and the mkdtemp dirs, when the test process exits.
 const tempDirs = [];
 
+// The companion resolves its state dir from CLAUDE_PLUGIN_DATA, which a Claude Code session exports
+// pointing at the installed plugin's real data dir. Pin it to a per-run temp dir here, once, so spawned
+// companions inherit it and in-process imports of lib/state.mjs see it; otherwise job state leaks there.
+const pluginDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-test-data-"));
+process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+tempDirs.push(pluginDataDir);
+
 function reapTempDirs() {
   for (const dir of tempDirs.splice(0)) {
     try {
