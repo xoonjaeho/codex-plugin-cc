@@ -27,12 +27,44 @@ const pluginDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-test-d
 process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
 tempDirs.push(pluginDataDir);
 
+function findBrokerStateFiles(root) {
+  const found = [];
+  const stack = [root];
+  while (stack.length) {
+    let entries;
+    try {
+      entries = fs.readdirSync(stack.pop(), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(entry.parentPath ?? entry.path, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.name === "broker.json") {
+        found.push(full);
+      }
+    }
+  }
+  return found;
+}
+
 function reapTempDirs() {
   for (const dir of tempDirs.splice(0)) {
     try {
       const session = loadBrokerSession(dir);
       if (session) {
         teardownBrokerSession({ ...session, killProcess: terminateProcessTree });
+      }
+      // Tests that pin their own CLAUDE_PLUGIN_DATA keep broker.json under that dir's
+      // state tree, which loadBrokerSession(dir) above never looks at.
+      for (const file of findBrokerStateFiles(dir)) {
+        try {
+          const nested = JSON.parse(fs.readFileSync(file, "utf8"));
+          teardownBrokerSession({ ...nested, killProcess: terminateProcessTree });
+        } catch {
+          // Malformed or unreadable session file: nothing to reap from it.
+        }
       }
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
